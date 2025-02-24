@@ -1,0 +1,61 @@
+---
+title: "RNA_unsupervised_modules"
+format: html
+editor: visual
+---
+
+## Leiden modules
+
+```{r}
+#Libraries
+library(igraph)
+
+#Creating correlation matrix
+corr_matrix <- abs(cor(t(min_filt)))
+
+#Find top variant genes
+variances <- sort(apply(min_filt, 1, var), decreasing = TRUE)
+topvargenes <- head(order(rowVars(as.matrix(min_filt)), decreasing = TRUE), 10000)
+topvargenes <- rownames(min_filt)[topvargenes]
+
+#Build correlation matrix
+raw_adjc_matrix <- corr_matrix[topvargenes, topvargenes]
+diag(raw_adjc_matrix) <- 0
+g1 <- graph_from_adjacency_matrix(raw_adjc_matrix, mode = "undirected", weighted = TRUE)
+
+#Use leiden clustering to find modules
+set.seed(1)
+modulos<-cluster_leiden(g1, resolution_parameter = 0.55) #This yields around 100 modules
+
+#Filter out small modules
+module_lengths <- sizes(modulos)
+length(which(module_lengths > 5))
+leiden_modules <- sapply(which(module_lengths > 5), function(x) modulos[[x]])
+
+save(leiden_modules, file = "/home/daniel/IMMUCAN/leiden_modules")
+```
+
+## ICA modules
+
+```{python}
+import pandas as pd
+from sica.base import StabilizedICA 
+
+#Read gene expression
+df = pd.read_csv("/home/daniel/IMMUCAN/minfilt_topvar_zscore.csv" , index_col=0)
+
+#Fit ICA
+dim_opt = 35
+sICA = StabilizedICA(n_components=dim_opt, n_runs=30, plot=True, n_jobs=-1)
+sICA.fit(df)
+
+#Retrieve metagenes and metasamples
+Metagenes = pd.DataFrame(sICA.S_ ,
+                         columns = df.columns ,
+                         index = ['metagene ' + str(i) for i in range(sICA.S_.shape[0])])
+Metagenes.to_csv("/home/daniel/IMMUCAN/Modules_RNAseq/ICA_full_metagenes_topvar_zscore_35_converged.csv")
+Metasamples = pd.DataFrame(sICA.transform(df), 
+                           columns = ['ICA_' + str(i) for i in range(sICA.S_.shape[0])], 
+                           index = df.index)
+Metasamples.to_csv("/home/daniel/IMMUCAN/Modules_RNAseq/ICA_full_metasamples_topvar_zscore_35_converged.csv")
+```

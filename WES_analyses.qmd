@@ -1,0 +1,2063 @@
+---
+title: "WES_analyses"
+format: html
+editor: visual
+---
+
+```{r output = FALSE}
+#Libraries
+library(ggpubr)
+library(tibble)
+library(ComplexHeatmap)
+library(dplyr)
+library(tidyr)
+```
+
+# WES analyses
+
+Import and process necessary files
+
+```{r}
+samples_file <- "/home/daniel/IMMUCAN/Upstream/Metadata_Clinicaldata/coldata_samples_all_SCCHN_20240624.csv"
+clinical_file <- "/home/daniel/IMMUCAN/Upstream/Metadata_Clinicaldata/IMMUCAN_HN_298_20240821.csv"
+samples_data_raw <- read.csv(samples_file, sep = ";")
+samples_data_raw <- samples_data_raw[!duplicated(samples_data_raw$sample), ]
+rownames(samples_data_raw) <- samples_data_raw$sample
+
+
+clinical_data_raw <- read.csv(clinical_file, sep = ";")
+rownames(clinical_data_raw) <- clinical_data_raw$patient
+
+clinical_data_raw$max_line_before_Rbiopsy_si[clinical_data_raw$max_line_before_Rbiopsy_si == ">3"] <- "3+"
+clinical_data_raw$max_line_before_Rbiopsy_si[clinical_data_raw$RM_type == "M_naive"] <- "-1"
+
+molecular_scores <- read.csv(
+  "/home/daniel/IMMUCAN/H&N/molecular_scores_cnv.csv",
+  sep = ";",
+  dec = ","
+)
+rownames(molecular_scores) <- molecular_scores$sample
+samples_wes <- samples_data_raw[rownames(samples_data_raw) %in% rownames(molecular_scores) &
+                                  samples_data_raw$SAMP_timepoint %in% c("Registration", "UPSTREAM_Post_treatment"), ]
+duplicates <- paste(names(table(samples_wes$patient))[table(samples_wes$patient) == 2], "-FIXT", sep = "")
+samples_wes <- samples_wes[-grep(paste(duplicates, collapse = "|"), rownames(samples_wes)), ]
+clinical_data_rm_wes <- clinical_data_raw[rownames(clinical_data_raw) %in% gsub("-F.*", "", rownames(samples_wes)), ]
+clinical_data_rm_wes <- clinical_data_rm_wes[clinical_data_rm_wes$Article_I == "Yes" , ]
+samples_data_rm_wes <- samples_wes[samples_wes$patient %in% rownames(clinical_data_rm_wes), ]
+samples_data_rm_wes <- samples_data_rm_wes[order(samples_data_rm_wes$patient), ]
+clinical_data_rm_wes <- clinical_data_rm_wes[order(rownames(clinical_data_rm_wes)), ]
+
+molecular_scores <- molecular_scores[rownames(samples_data_rm_wes), ]
+
+snv_wes <- read.csv(
+  "/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_variants_20240820.csv",
+  sep = ";"
+)
+rownames(snv_wes) <- snv_wes$sample
+snv_wes <- snv_wes[rownames(samples_data_rm_wes), ]
+
+cnv_wes <- read.csv(
+  "/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_CNVgene_20240820.csv",
+  sep = ";"
+)
+rownames(cnv_wes) <- cnv_wes$sample
+cnv_wes <- cnv_wes[rownames(samples_data_rm_wes), ]
+
+pathways_wes <- read.csv(
+  "/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_pathways_20240820.csv",
+  sep = ";"
+)
+rownames(pathways_wes) <- pathways_wes$sample
+pathways_wes <- pathways_wes[rownames(samples_data_rm_wes), ]
+
+mutations_type <- read.csv(
+  "/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_variants_type_20240820.csv",
+  sep = ";"
+)
+rownames(mutations_type) <- mutations_type$sample
+mutations_type <- mutations_type[rownames(samples_data_rm_wes), ]
+```
+
+```{r}
+# Preprocessing
+colda <- clinical_data_raw %>% filter(Article_I == "Yes")
+colda <- colda %>% mutate(Death = case_when(
+  !is.na(Death_date) ~ 1,
+  is.na(Timing_Rbiopsy_OS_date) ~
+    as.numeric(NA),
+  is.na(Death_date) ~
+    0
+))
+
+colda <- colda %>% mutate(Timing_Rbiopsy_OS_date_months = Timing_Rbiopsy_OS_date /
+                            30.417)
+
+
+
+colda$Prim_diagnosis[colda$Prim_diagnosis == "Oral_cavity"] <- "Oral cavity"
+colda$Prim_diagnosis <- factor(colda$Prim_diagnosis,
+                               levels = c("Oral cavity", "Oropharynx", "Hypopharynx", "Larynx"))
+colda$Prim_diagnosis_HPVstatus <-  factor(
+  colda$Prim_diagnosis_HPVstatus,
+  levels = c(
+    "Oral_cavity",
+    "Oropharynx_HPV-",
+    "Oropharynx_HPV+",
+    "Hypopharynx",
+    "Larynx"
+  )
+)
+levels(colda$Prim_diagnosis_HPVstatus) <- c("Oral cavity",
+                                            "Oropharynx HPV-",
+                                            "Oropharynx HPV+",
+                                            "Hypopharynx",
+                                            "Larynx")
+
+
+colda$extent <- factor(colda$Metastatic_at_Rbiopsy)
+levels(colda$extent) <- c("Locoregional", "Distant metastasis")
+colda$Consumption <- factor(colda$Consumption)
+levels(colda$Consumption) <- c("Non smoker non drinker", "Smoker and/or drinker")
+
+colda$max_line_before_Rbiopsy_f <- factor(colda$max_line_before_Rbiopsy)
+
+
+colda$max_line_before_Rbiopsy_si <- factor(colda$max_line_before_Rbiopsy_si,
+                                           levels = c("0", "1", "2", "3", ">3"))
+colda <- colda %>% mutate(
+  max_line_before_Rbiopsy_sii = case_when(max_line_before_Rbiopsy > 3 ~ 4, TRUE ~
+                                            max_line_before_Rbiopsy)
+)
+
+samples <- samples_data_raw %>%
+  filter(patient  %in% colda$patient) %>%
+  filter(SAMP_timepoint %in% c("Registration", "UPSTREAM_Post_treatment") &
+           DNA != "NULL")
+duplicates <- paste(names(table(samples$patient))[table(samples$patient) == 2], "-FIXT", sep = "")
+samples <- samples[-grep(paste(duplicates, collapse = "|"), rownames(samples)), ]
+
+colda <- colda %>% left_join(samples %>% select(c(patient, samptype, subsite_si)))
+colda$samptype <- factor(
+  colda$samptype,
+  levels = c("Primary_site", "Regional_lymph_node", "Distant_metastases")
+)
+levels(colda$samptype) <- c("Primary site", "Regional lymph node", "Distant metastases")
+
+
+snv_wes <- snv_wes %>% filter(sample %in% samples$sample)
+mutations_type <- mutations_type %>% filter(sample %in% samples$sample)
+cnv_wes <- cnv_wes %>% filter(sample %in% samples$sample)
+pathways_wes <- pathways_wes %>% filter(sample %in% samples$sample)
+molecular_scores <- molecular_scores %>% filter(sample %in% samples$sample)
+
+pathways_wes <- pathways_wes %>% left_join(samples %>% select(patient, sample))
+
+colda <- colda %>%
+  left_join(molecular_scores)
+colda <- colda %>%
+  left_join(samples %>% select(patient, specimen_type, DNA_assay_library))
+```
+
+```{r}
+#Processing of genomic data for oncoprint
+mut_n <- snv_wes %>% 
+  select(-sample)%>%
+  gather(key = gene, value= alteration, -patient) %>% 
+  filter(alteration != "WT") %>%
+  group_by(gene) %>%
+  count() %>%
+  filter(n  > 8)
+rownames(mutations_type) <- NULL
+mut <- column_to_rownames(mutations_type, "patient")
+mut <- mut %>% select(mut_n$gene)
+mut_t <- as.data.frame(t(mut))
+mut_t[mut_t == "WT"] <- NA
+
+
+cnv_n <- cnv_wes %>% 
+  select(-sample) %>% 
+  gather(key = gene, value= alteration, -patient) %>%
+  filter(alteration != "noCNA") %>% 
+  group_by(gene) %>% count() %>%
+  filter(n  > 8)
+rownames(cnv_wes) <- NULL
+cnv <- column_to_rownames(cnv_wes, "patient")
+cnv <- cnv %>% select(cnv_n$gene)
+colnames(cnv) <- paste(" ", colnames(cnv), sep ="")
+colnames(cnv)[colnames(cnv)== " FGF3"] <- " 11q13.3"
+cnv_t <- as.data.frame(t(cnv))
+cnv_t[cnv_t == "noCNA"] <- NA
+
+rownames(colda) <- colda$patient
+
+colda <- colda %>% arrange(patient)
+mut_t <- mut_t %>% select(colda$patient)
+molecular <- molecular_scores
+molecular <- molecular %>% arrange(patient)
+rownames(molecular) <- molecular$patient
+
+
+cnv_t <- cnv_t %>% select(colnames(mut_t))
+driver_alt <- rbind(cnv_t, mut_t)
+
+
+genes <- as.data.frame(rownames(driver_alt))
+colnames(genes)[1] <- "genes"
+genes <- genes %>%
+  mutate(gr = case_when(genes %in% rownames(cnv_t) ~ "CNA", TRUE ~ "Mutation"))
+
+genes$gr <- factor(genes$gr, levels = c("Mutation", "CNA"))
+
+driver_alt[driver_alt == "Non-sens with NMD"] <- "Non-sense with NMD"
+
+col_f <-  c(
+  Frameshift = "#ff7f00",
+  "Inframe in_del" = "#377eb8",
+  "Non-sense with NMD" = "#e7298a",
+  "Splice site" = "#ffff33",
+  Missense = "#4daf4a",
+  'Multi-Hit' = "#984ea3",
+  Promoter = "#a65628",
+  Amplification = "#e41a1c",
+  Deletion = "#034e7b"
+)
+
+```
+
+```{r}
+levels(colda$Prim_diagnosis)  <-  c("Oral cavity (57)",
+                                    "Oropharynx (116)",
+                                    "Hypopharynx (46)",
+                                    "Larynx (34)" ) 
+table(colda$max_line_before_Rbiopsy_si)
+colda$HPV_status_temp <- factor(colda$HPV_status_temp)
+levels(colda$HPV_status_temp) <- c("HPV-negative (202)", "HPV-positive (51)")
+levels(colda$Consumption) <- c("Non smoker non drinker (45)" ,"Smoker and/or drinker (207)")
+
+levels(colda$extent) <- c("Locoregional only (78)" , "Distant metastasis (175)")
+levels(colda$max_line_before_Rbiopsy_si) <-  c("0 (64)", "1 (46)", "2 (71)", "3 (52)", ">3 (20)")
+```
+
+```{r}
+#Figure 1B) General oncoprint
+colda <- colda %>% mutate(
+  max_lin = case_when(
+    any_treatment_before_Rbiopsy == "Naive" ~ "M naive (19)",
+    max_line_before_Rbiopsy_si == "0 (64)" ~ "0 (45)",
+    TRUE ~ max_line_before_Rbiopsy_si
+  )
+)
+colda$max_lin <- factor(colda$max_lin,
+                        levels = c("M naive (19)", "0 (45)", 
+                                   "1 (46)", "2 (71)", "3 (52)", ">3 (20)"))
+ha_clinical <- HeatmapAnnotation(
+  'Primary disease' = colda$Prim_diagnosis,
+  "HPV status" = colda$HPV_status_temp,
+  'Substance abuse' = colda$Consumption,
+  'Disease extent' = colda$extent,
+  'Number R/M line' = colda$max_lin,
+  annotation_name_side = "right",
+  gp = gpar(col = "white", fontsize = 8),
+  annotation_name_gp = gpar(fontsize = 8),
+  col = list(
+    'Primary disease' = c(
+      "Oral cavity (57)" = "#fdc086" ,
+      "Oropharynx (116)" = "#beaed4",
+      "Hypopharynx (46)" = "#7fc97f",
+      "Larynx (34)" = "#ffff99"
+    ),
+    'HPV status' = c(
+      "HPV-positive (51)" = "red",
+      "HPV-negative (202)" = "#d9d9d9"
+    ),
+    'Substance abuse' = c(
+      "Smoker and/or drinker (207)" = "#737373",
+      "Non smoker non drinker (45)" = "#d9d9d9"
+    ),
+    "Number R/M line" = c(
+      "M naive (19)" = "#f1eef6",
+      "0 (45)" = "#d0d1e6",
+      "1 (46)" = "#a6bddb" ,
+      "2 (71)" = "#74a9cf",
+      "3 (52)" = "#2b8cbe" ,
+      ">3 (20)" = "#045a8d"
+    ),
+    'Disease extent' = c(
+      "Locoregional only (78)" = "#a6d854",
+      "Distant metastasis (175)" = "#e78ac3"
+    ),
+    "Biopsy site" = c(
+      "Primary site" = "#008837",
+      "Regional lymph node" = "#d01c8b",
+      "Distant metastases" = "#7b3294"
+    )
+  ),
+  annotation_legend_param =  list(
+    title_gp = gpar(fontsize = 8, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8)
+  ),
+  show_legend = TRUE,
+  show_annotation_name = TRUE,
+  TMB = anno_barplot(
+    molecular$tmb,
+    axis_param = list(gp = gpar(fontsize = 6)),
+    ylim = c(0, 32)
+  ),
+  na_col = "grey"
+)
+
+
+ht_alt <- oncoPrint(
+  driver_alt,
+  alter_fun = list(
+    background = function(x, y, w, h) {
+      grid.rect(x,
+                y,
+                w - unit(2, "pt"),
+                h - unit(2, "pt"),
+                gp = gpar(fill = "#f0f0f0", col = NA))
+    } ,
+    Frameshift = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Frameshift"], col = NA)),
+    "Inframe in_del" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Inframe in_del"], col = NA)),
+    Missense = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Missense"], col = NA)),
+    "Non-sense with NMD" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Non-sense with NMD"], col = NA)),
+    "Splice site" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Splice site"], col = NA)),
+    "Promoter" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Promoter"], col = NA)),
+    'Multi-Hit' = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f['Multi-Hit'], col = NA)) ,
+    Amplification = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Amplification"], col = NA)),
+    Deletion = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Deletion"], col = NA))
+  ),
+  col = col_f,
+  right_annotation = NULL ,
+  row_names_side = "left",
+  pct_side = "right",
+  row_title = c("Most frequent mutated genes", "Most frequent CNA"),
+  row_title_side = "left",
+  show_column_names = FALSE,
+  row_title_gp = gpar(fontsize = 10),
+  border = TRUE,
+  row_names_gp = gpar(fontsize = 7) ,
+  pct_gp = gpar(fontsize = 7),
+  heatmap_legend_param = list(
+    title = "Alteration",
+    title_gp = gpar(fontsize = 8, fontface = "bold")
+  ),
+  #labels_gp = gpar(fontsize =8 ) ),
+  top_annotation = ha_clinical,
+  row_split = genes$gr
+)
+
+
+draw(ht_alt, merge_legend = TRUE)
+decorate_annotation("TMB", {
+  grid.lines(c(0, 1), unit(c(10, 10), "native"), gp = gpar(lty = 2, col = "red"))
+})
+```
+
+```{r}
+#Figure S3A) Oncoprint according to HPV status
+colda <- clinical_data_raw %>% filter(Article_I == "Yes")
+colda <- colda %>% mutate(Death = case_when(
+  !is.na(Death_date) ~ 1,
+  is.na(Timing_Rbiopsy_OS_date) ~
+    as.numeric(NA),
+  is.na(Death_date) ~
+    0
+))
+
+colda <- colda %>% mutate(Timing_Rbiopsy_OS_date_months = Timing_Rbiopsy_OS_date /
+                            30.417)
+
+colda$Prim_diagnosis[colda$Prim_diagnosis == "Oral_cavity"] <- "Oral cavity"
+colda$Prim_diagnosis <- factor(colda$Prim_diagnosis,
+                               levels = c("Oral cavity", "Oropharynx", "Hypopharynx", "Larynx"))
+colda$Prim_diagnosis_HPVstatus <-  factor(
+  colda$Prim_diagnosis_HPVstatus,
+  levels = c(
+    "Oral_cavity",
+    "Oropharynx_HPV-",
+    "Oropharynx_HPV+",
+    "Hypopharynx",
+    "Larynx"
+  )
+)
+levels(colda$Prim_diagnosis_HPVstatus) <- c("Oral cavity",
+                                            "Oropharynx HPV-",
+                                            "Oropharynx HPV+",
+                                            "Hypopharynx",
+                                            "Larynx")
+
+
+colda$extent <- factor(colda$Metastatic_at_Rbiopsy)
+levels(colda$extent) <- c("Locoregional", "Distant metastasis")
+colda$Consumption <- factor(colda$Consumption)
+levels(colda$Consumption) <- c("Non smoker non drinker", "Smoker and/or drinker")
+
+colda$max_line_before_Rbiopsy_f <- factor(colda$max_line_before_Rbiopsy)
+
+
+colda$max_line_before_Rbiopsy_si <- factor(colda$max_line_before_Rbiopsy_si,
+                                           levels = c("0", "1", "2", "3", ">3"))
+colda <- colda %>% mutate(
+  max_line_before_Rbiopsy_sii = case_when(max_line_before_Rbiopsy > 3 ~ 4, TRUE ~
+                                            max_line_before_Rbiopsy)
+)
+
+
+samples <- samples_data_raw %>% filter(patient  %in% colda$patient) %>% filter(SAMP_timepoint %in% c("Registration", "UPSTREAM_Post_treatment") &
+                                                                                 DNA != "NULL")
+duplicates <- paste(names(table(samples$patient))[table(samples$patient) == 2], "-FIXT", sep = "")
+samples <- samples[-grep(paste(duplicates, collapse = "|"), rownames(samples)), ]
+
+colda <- colda %>% left_join(samples %>% select(c(patient, samptype, subsite_si)))
+colda$samptype <- factor(
+  colda$samptype,
+  levels = c("Primary_site", "Regional_lymph_node", "Distant_metastases")
+)
+levels(colda$samptype) <- c("Primary site", "Regional lymph node", "Distant metastases")
+
+
+mutations <- snv_wes %>% filter(sample %in% samples$sample)
+mutations_type <- mutations_type %>% filter(sample %in% samples$sample)
+CNV <- cnv_wes %>% filter(sample %in% samples$sample)
+pathways <- pathways_wes %>% filter(sample %in% samples$sample)
+molecular_scores <- molecular_scores %>% filter(sample %in% samples$sample)
+
+pathways <- pathways %>% left_join(samples %>% select(patient, sample))
+
+colda <- colda %>% left_join(molecular_scores)
+colda <- colda %>% left_join(samples %>% select(patient, specimen_type, DNA_assay_library))
+colda <- colda %>% mutate(
+  max_lin = case_when(
+    any_treatment_before_Rbiopsy == "Naive" ~ "M naive (19)",
+    max_line_before_Rbiopsy_si == "0 (64)" ~
+      "0 (45)",
+    TRUE ~ max_line_before_Rbiopsy_si
+  )
+)
+table(colda$max_lin)
+colda$max_lin <- factor(colda$max_lin, levels = c("M naive", "0", "1", "2", "3", ">3"))
+
+colda$HPV_status_temp <- factor(colda$HPV_status_temp)
+levels(colda$HPV_status_temp) <- c("HPV-negative", "HPV-positive")
+
+levels(colda$extent) <- c("Locoregional only" , "Distant metastasis")
+colda_pos <- colda %>% filter(HPV_status_temp == "HPV-positive") %>% arrange(patient)
+colda_neg <- colda %>% filter(HPV_status_temp == "HPV-negative") %>% arrange(patient)
+rownames(colda_pos) <- colda_pos$patient
+rownames(colda_neg) <- colda_neg$patient
+mol_pos <- molecular %>% filter(patient %in% colda_pos$patient) %>% arrange(patient)
+rownames(mol_pos) <- mol_pos$patient
+mol_neg <- molecular %>% filter(patient %in% colda_neg$patient) %>% arrange(patient)
+rownames(mol_neg) <- mol_neg$patient
+
+ha_clinical_pos <- HeatmapAnnotation(
+  'Primary disease' = colda_pos$Prim_diagnosis,
+  "HPV status" = colda_pos$HPV_status_temp,
+  'Substance abuse' = colda_pos$Consumption,
+  'Disease extent' = colda_pos$extent,
+  'Number R/M line' = colda_pos$max_lin,
+  # 'Biopsy site'= colda$samptype,
+  annotation_name_side = "right",
+  gp = gpar(col = "white", fontsize = 8),
+  annotation_name_gp = gpar(fontsize = 8),
+  col = list(
+    'Primary disease' = c(
+      "Oral cavity" = "#fdc086" ,
+      "Oropharynx" = "#beaed4",
+      "Hypopharynx" = "#7fc97f",
+      "Larynx" = "#ffff99"
+    ),
+    'HPV status' = c(
+      "HPV-positive" = "red",
+      "HPV-negative" = "#d9d9d9"
+    ),
+    'Substance abuse' = c(
+      "Smoker and/or drinker" = "#737373",
+      "Non smoker non drinker" = "#d9d9d9"
+    ),
+    "Number R/M line" = c(
+      "M naive" = "#f1eef6",
+      "0" = "#d0d1e6",
+      "1" = "#a6bddb" ,
+      "2" = "#74a9cf",
+      "3" = "#2b8cbe" ,
+      ">3" = "#045a8d"
+    ),
+    'Disease extent' = c(
+      "Locoregional only" = "#a6d854",
+      "Distant metastasis" = "#e78ac3"
+    ),
+    "Biopsy site" = c(
+      "Primary site" = "#008837",
+      "Regional lymph node" = "#d01c8b",
+      "Distant metastases" = "#7b3294"
+    )
+    
+    
+  ),
+  annotation_legend_param =  list(
+    title_gp = gpar(fontsize = 8, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8)
+  ),
+  show_legend = TRUE,
+  show_annotation_name = TRUE,
+  TMB = anno_barplot(
+    mol_pos$tmb,
+    axis_param = list(gp = gpar(fontsize = 6)),
+    ylim = c(0, 32)
+  ),
+  na_col = "grey"
+)
+
+ht_alt_pos <- oncoPrint(
+  driver_alt[colda_pos$patient],
+  alter_fun = list(
+    background = function(x, y, w, h) {
+      grid.rect(x,
+                y,
+                w - unit(2, "pt"),
+                h - unit(2, "pt"),
+                gp = gpar(fill = "#f0f0f0", col = NA))
+    } ,
+    Frameshift = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Frameshift"], col = NA)),
+    "Inframe in_del" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Inframe in_del"], col = NA)),
+    Missense = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Missense"], col = NA)),
+    "Non-sense with NMD" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Non-sense with NMD"], col = NA)),
+    "Splice site" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Splice site"], col = NA)),
+    "Promoter" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Promoter"], col = NA)),
+    'Multi-Hit' = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f['Multi-Hit'], col = NA)) ,
+    Amplification = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Amplification"], col = NA)),
+    Deletion = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Deletion"], col = NA))
+  ),
+  col = col_f,
+  right_annotation = NULL ,
+  row_names_side = "left",
+  pct_side = "right",
+  row_title = c("Most frequent mutated genes", "Most frequent CNA"),
+  row_title_side = "left",
+  show_column_names = FALSE,
+  show_heatmap_legend = FALSE,
+  row_title_gp = gpar(fontsize = 10),
+  border = TRUE,
+  row_names_gp = gpar(fontsize = 7) ,
+  pct_gp = gpar(fontsize = 7),
+  heatmap_legend_param = list(
+    title = "Alteration",
+    title_gp = gpar(fontsize = 8, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8)
+  ),
+  top_annotation = ha_clinical_pos,
+  row_split = genes$gr
+)
+
+
+ha_clinical_neg <- HeatmapAnnotation(
+  'Primary disease' = colda_neg$Prim_diagnosis,
+  "HPV status" = colda_neg$HPV_status_temp,
+  'Substance abuse' = colda_neg$Consumption,
+  'Disease extent' = colda_neg$extent,
+  'Number R/M line' = colda_neg$max_lin,
+  # 'Biopsy site'= colda$samptype,
+  annotation_name_side = "right",
+  gp = gpar(col = "white", fontsize = 8),
+  annotation_name_gp = gpar(fontsize = 8),
+  col = list(
+    'Primary disease' = c(
+      "Oral cavity" = "#fdc086" ,
+      "Oropharynx" = "#beaed4",
+      "Hypopharynx" = "#7fc97f",
+      "Larynx" = "#ffff99"
+    ),
+    'HPV status' = c(
+      "HPV-positive" = "red",
+      "HPV-negative" = "#d9d9d9"
+    ),
+    'Substance abuse' = c(
+      "Smoker and/or drinker" = "#737373",
+      "Non smoker non drinker" = "#d9d9d9"
+    ),
+    "Number R/M line" = c(
+      "M naive" = "#f1eef6",
+      "0" = "#d0d1e6",
+      "1" = "#a6bddb" ,
+      "2" = "#74a9cf",
+      "3" = "#2b8cbe" ,
+      ">3" = "#045a8d"
+    ),
+    'Disease extent' = c(
+      "Locoregional only" = "#a6d854",
+      "Distant metastasis" = "#e78ac3"
+    ),
+    "Biopsy site" = c(
+      "Primary site" = "#008837",
+      "Regional lymph node" = "#d01c8b",
+      "Distant metastases" = "#7b3294"
+    )
+    
+    
+  ),
+  annotation_legend_param =  list(
+    title_gp = gpar(fontsize = 8, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8)
+  ),
+  show_legend = TRUE,
+  show_annotation_name = FALSE,
+  TMB = anno_barplot(
+    mol_neg$tmb,
+    axis_param = list(gp = gpar(fontsize = 6)),
+    ylim = c(0, 32)
+  ),
+  na_col = "grey"
+)
+
+
+ht_alt_neg <- oncoPrint(
+  driver_alt[colda_neg$patient],
+  alter_fun = list(
+    background = function(x, y, w, h) {
+      grid.rect(x,
+                y,
+                w - unit(2, "pt"),
+                h - unit(2, "pt"),
+                gp = gpar(fill = "#f0f0f0", col = NA))
+    } ,
+    Frameshift = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Frameshift"], col = NA)),
+    "Inframe in_del" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Inframe in_del"], col = NA)),
+    Missense = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Missense"], col = NA)),
+    "Non-sense with NMD" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Non-sense with NMD"], col = NA)),
+    "Splice site" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Splice site"], col = NA)),
+    "Promoter" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Promoter"], col = NA)),
+    'Multi-Hit' = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f['Multi-Hit'], col = NA)) ,
+    Amplification = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Amplification"], col = NA)),
+    Deletion = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Deletion"], col = NA))
+  ),
+  col = col_f,
+  right_annotation = NULL ,
+  row_names_side = "left",
+  pct_side = "right",
+  row_title = c("Most frequent mutated genes", "Most frequent CNA"),
+  row_title_side = "left",
+  show_column_names = FALSE,
+  row_title_gp = gpar(fontsize = 10),
+  border = TRUE,
+  row_names_gp = gpar(fontsize = 7) ,
+  pct_gp = gpar(fontsize = 7),
+  heatmap_legend_param = list(
+    title = "Alteration",
+    title_gp = gpar(fontsize = 8, fontface = "bold")
+  ),
+  #labels_gp = gpar(fontsize =8 ) ),
+  top_annotation = ha_clinical_neg,
+  row_split = genes$gr
+)
+
+
+ht_list <- ht_alt_neg + ht_alt_pos
+draw(ht_list, merge_legend = TRUE)
+
+```
+
+```{r}
+#Figure S1A-B) Association of TMB to other genomic parameters
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue",] %>% 
+  ggplot(aes(tmb, ploidy)) +
+  geom_point() + stat_cor(size = 5, method = "spearman", label.x = 15) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) + ylab("Ploidy") +
+  xlab("TMB (mutations/Mb)")
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue",]  %>%
+  ggplot(aes(reorder(TMB_level, ploidy), ploidy)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Ploidy") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) 
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue",] %>% 
+  ggplot(aes(tmb, CNA_altered)) +
+  geom_point() + stat_cor(size = 5, method = "spearman", label.x = 15) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) + ylab("Fraction genome altered") +
+  xlab("TMB (mutations/Mb)")
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue",]  %>%
+  ggplot(aes(reorder(TMB_level, CNA_altered), CNA_altered)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Fraction genome altered") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) 
+```
+
+## HPV analyses
+
+```{r}
+#SNVs different between HPV-negative and positive
+cc <- snv_wes %>% select(-patient) %>%
+  gather(key = Gene_Name, value = alteration, -sample) %>% 
+  filter(alteration != "WT") %>%
+  select(-sample) %>%
+  unique()
+gg <- clinical_data_rm_wes %>% 
+  select(patient, HPV_status_temp) %>%
+  left_join(snv_wes %>% select(patient, cc$Gene_Name))
+
+cc$pvalue <- sapply(cc$Gene_Name,
+                    function(x) fisher.test(gg$HPV_status_temp, gg[,x])$p.value)
+
+ff <- snv_wes %>%
+  gather(key = Gene_Name, value = alteration, -c(patient, sample)) %>%
+  filter(alteration != "WT") %>% 
+  left_join(clinical_data_rm_wes %>% select(patient, HPV_status_temp)) %>%
+  group_by(HPV_status_temp, Gene_Name) %>%
+  count() %>% 
+  spread(key= HPV_status_temp, value= n)
+
+ff[is.na(ff)] <- 0
+
+ff <- ff %>% mutate(Negative_freq = Negative/202*100)%>%
+  mutate(Positive_freq = Positive/51*100)  %>% mutate(diff_freq = Negative_freq - Positive_freq)
+
+ff <- ff %>% left_join(cc %>% filter(!is.na(pvalue))%>% select(Gene_Name, pvalue))
+
+```
+
+```{r}
+#Figure 2A) Most common SNVs in HPV-positive patients
+mut_HPVneg_top <- head(ff %>% arrange(desc(Negative)),16)
+mut_HPVpos_top <- head(ff %>% arrange(desc(Positive)),16)
+
+mut_HPVpos_top <- mut_HPVpos_top %>% 
+  filter(!Gene_Name %in% c("EP300", "EPHA7", "FAT4")) %>% 
+  rbind(ff %>% filter(Gene_Name %in% c("RUNX1", "TSHR", "MYC")))
+
+df_l <- ff %>%
+  select(Gene_Name, Negative_freq, Positive_freq) %>% 
+  gather(key= HPV_status, value= Frequence, -Gene_Name) 
+df_l$HPV_status <- factor(df_l$HPV_status, levels= c("Negative_freq", "Positive_freq"))
+levels(df_l$HPV_status) <- c("HPV-negative" , "HPV-positive")
+
+df_l_pos <- df_l %>% filter(Gene_Name %in% mut_HPVpos_top$Gene_Name) 
+
+df_l_pos$Gene_Name <- factor(df_l_pos$Gene_Name, levels= mut_HPVpos_top$Gene_Name)
+
+ann_dat_text <- df_l_pos %>% left_join(ff %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>% 
+  mutate(pp= case_when( HPV_status == "HPV-negative" ~NA,
+                        Gene_Name == "TP53" ~ "p= 6e-24", 
+                        pvalue > 0.05 ~NA,
+                        TRUE~ paste("p=", round(pvalue,3 ), sep = ""))) %>% 
+  mutate(Frequence= 90)
+
+df_l_pos <- df_l_pos %>% mutate(Mutations= "Mutations")
+
+ggplot(df_l_pos, aes(x = Gene_Name, y = Frequence, fill = HPV_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) + 
+  facet_wrap(~ Mutations) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +  labs(x = "Most frequent mutated genes in HPV-positive R/M SCCHN",
+                     y = "Percentage of patients",
+                     fill = "",
+                     title = "") +
+  scale_fill_manual(values = c("#999999", "red"))  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 7),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  ) + theme(
+    plot.title = element_blank(),
+    legend.position = c(0.90, 0.7),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  )
+```
+
+```{r}
+#Figure 2B) Most common SNVs in HPV-negative patients
+df_l_neg <- df_l %>% filter(Gene_Name %in% mut_HPVneg_top$Gene_Name) 
+
+df_l_neg$Gene_Name <- factor(df_l_neg$Gene_Name, levels= mut_HPVneg_top$Gene_Name)
+
+ann_dat_text <- df_l_neg %>% left_join(ff %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>% 
+  mutate(pp= case_when( HPV_status == "HPV-positive" ~NA,
+                        Gene_Name == "TP53" ~ "p= 6e-24", 
+                        Gene_Name == "CDKN2A" ~"p= 2e-4",
+                        pvalue > 0.05 ~NA,
+                        TRUE~ paste("p=", round(pvalue,3 ), sep = ""))) %>% 
+  mutate(Frequence= 90)
+
+
+df_l_neg <- df_l_neg %>% mutate(Mutations  = "Mutations")
+ggplot(df_l_neg, aes(x = Gene_Name, y = Frequence, fill = HPV_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) + 
+  facet_wrap( ~ "Mutations") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +  labs(x = "Most frequent mutated genes in HPV-negative R/M SCCHN",
+                     y = "Percentage of patients",
+                     fill = "",
+                     title = " ") +
+  scale_fill_manual(values = c("#999999", "red"))  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 7),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  ) + theme(
+    plot.title = element_blank(),
+    legend.position = c(0.90, 0.7),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  )
+```
+
+```{r}
+#CNVs processing
+cc <- cnv_wes %>% 
+  select(-patient) %>% 
+  gather(key = Gene_Name, value = alteration, -sample) %>%
+  filter(alteration != "noCNA") %>%
+  select(-sample) %>% 
+  unique()
+gg <- clinical_data_rm_wes %>% 
+  select(patient, HPV_status_temp) %>%
+  left_join(cnv_wes %>% select(patient, cc$Gene_Name))
+ 
+cc$pvalue <- sapply(cc$Gene_Name,
+                    function(x) fisher.test(gg$HPV_status_temp, gg[,x])$p.value)
+
+
+ff <- cnv_wes %>% 
+  gather(key = Gene_Name, value = alteration, -c(patient, sample)) %>% 
+  filter(alteration != "noCNA") %>%
+  left_join(clinical_data_rm_wes %>% select(patient, HPV_status_temp)) %>%
+  group_by(HPV_status_temp, Gene_Name) %>% 
+  count() %>%
+  spread(key = HPV_status_temp, value = n)
+ff[is.na(ff)] <- 0
+
+ff <- ff %>% mutate(Negative_freq = Negative/202*100)%>%
+  mutate(Positive_freq = Positive/51*100)  %>% mutate(diff_freq = Negative_freq - Positive_freq)
+
+
+ff <- ff %>% left_join(cc %>% filter(!is.na(pvalue))%>% select(Gene_Name, alteration, pvalue))
+
+
+ff <- ff %>% mutate(tot = sum(Negative, Positive)) %>% mutate(tot_freq = tot/253*100)
+```
+
+```{r}
+#Figure 2C) Most common CNV in HPV-positive patients
+ff$Gene_Name[ff$Gene_Name == "FGF3"] <- "11q13.3"
+ff <- ff %>% filter(!Gene_Name %in% c("CCND1", "FGF4", "FGF19")) %>% filter(!Gene_Name %in% c("HLA.A", "HLA.B", "HLA.C"))
+
+cnv_HPVneg_top <- ff %>% filter(Negative>9) %>% arrange(desc(Negative))
+cnv_HPVpos_top <- ff %>% filter(Positive > 1)%>% arrange(desc(Positive))
+
+df_l <- ff %>% select(Gene_Name, Negative_freq, Positive_freq) %>% gather(key= HPV_status, value= Frequence, -Gene_Name) 
+df_l<- df_l%>% left_join(ff %>% select(Gene_Name, alteration) %>% unique) %>% mutate(Gene = paste(Gene_Name, alteration, sep = "_" ))
+
+df_l$HPV_status <- factor(df_l$HPV_status, levels= c( "Negative_freq", "Positive_freq"))
+levels(df_l$HPV_status) <- c("HPV-negative","HPV-positive")
+
+df_l$Gene <- gsub("_Amplification", "\namp", df_l$Gene)
+df_l$Gene <- gsub("_Deletion", "\ndel", df_l$Gene)
+
+cnv_HPVpos_top <- cnv_HPVpos_top%>% left_join(ff %>% select(Gene_Name, alteration) %>% unique) %>% mutate(Gene = paste(Gene_Name, alteration, sep = "_" ))
+cnv_HPVpos_top$Gene <- gsub("_Amplification", "\namp", cnv_HPVpos_top$Gene)
+cnv_HPVpos_top$Gene <- gsub("_Deletion", "\ndel", cnv_HPVpos_top$Gene)
+
+cnv_HPVneg_top <- cnv_HPVneg_top%>% left_join(ff %>% select(Gene_Name, alteration) %>% unique) %>% mutate(Gene = paste(Gene_Name, alteration, sep = "_" ))
+cnv_HPVneg_top$Gene <- gsub("_Amplification", "\namp", cnv_HPVneg_top$Gene)
+cnv_HPVneg_top$Gene <- gsub("_Deletion", "\ndel", cnv_HPVneg_top$Gene)
+
+
+df_l_pos <- df_l %>% filter(Gene %in% cnv_HPVpos_top$Gene) 
+
+df_l_pos$Gene <- factor(df_l_pos$Gene, levels= cnv_HPVpos_top$Gene)
+
+ann_dat_text <- df_l_pos %>% left_join(ff %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>% 
+  mutate(pp= case_when( HPV_status == "HPV-positive" ~NA,
+                        Gene_Name == "11q13.3" ~"p=2e-6",
+                        pvalue > 0.05 ~NA,
+                        TRUE~ paste("p=", round(pvalue,3 ), sep = ""))) %>% 
+  mutate(Frequence= 50)
+
+df_l_pos <- df_l_pos %>% mutate(CNV = "CNV")
+ggplot(df_l_pos, aes(x = Gene, y = Frequence, fill = HPV_status))  +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) + 
+  facet_wrap( ~ CNV) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +  labs(x = "Most frequent CNA in HPV-positive R/M SCCHN",
+                     y = "Percentage of patients",
+                     fill = "",
+                     title = "CNA") +
+  scale_fill_manual(values = c("#999999", "red"))  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 7, angle = 0),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  ) + theme(
+    plot.title = element_blank(),
+    legend.position = c(0.9, 0.7),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  )
+```
+
+```{r}
+#Figure 2D) Most common CNVs in HPV-negative patients
+df_l_neg <- df_l %>% filter(Gene %in% cnv_HPVneg_top$Gene) 
+
+df_l_neg$Gene <- factor(df_l_neg$Gene, levels= cnv_HPVneg_top$Gene)
+
+ann_dat_text <- df_l_neg %>% left_join(ff %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>% 
+  mutate(pp= case_when( HPV_status == "HPV-positive" ~NA,
+                        Gene_Name == "11q13.3" ~"p=2e-6",
+                        Gene_Name == "CDKN2B" ~"p=4e-5",
+                        Gene_Name == "MTAP" ~"p=7e-5",
+                        Gene_Name == "CDKN2A" ~"p=3e-6",
+                        pvalue > 0.05 ~NA,
+                        TRUE~ paste("p=", round(pvalue,3 ), sep = ""))) %>% 
+  mutate(Frequence= 50)
+
+df_l_neg <- df_l_neg %>% mutate(CNV = "CNV")
+
+
+ggplot(df_l_neg, aes(x = Gene, y = Frequence, fill = HPV_status))  + 
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) + 
+  facet_wrap(~ CNV) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +  labs(x = "Most frequent CNA in HPV-negative R/M SCCHN",
+                     y = "Percentage of patients",
+                     fill = "",
+                     title = " ") +
+  scale_fill_manual(values = c("#999999", "red"))  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 7),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  ) + theme(
+    plot.title = element_text(hjust = 0, size = 10, face = "bold"),
+    legend.position = c(0.9, 0.7),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  )
+```
+
+```{r}
+#Pathway processing
+pathways_wes <- pathways_wes %>% 
+  left_join(samples_data_rm_wes %>% select(patient, sample))
+cc<- pathways_wes %>% 
+  select(-patient) %>%
+  gather(key= Gene_Name, value= alteration, -sample) %>% 
+  filter(alteration!= "noAlteration") %>%
+  select(-sample) %>% 
+  unique()
+gg <- clinical_data_rm_wes %>%
+  select(patient, HPV_status_temp) %>% 
+  left_join(pathways_wes %>% select(patient, cc$Gene_Name))
+
+cc$pvalue <- sapply(cc$Gene_Name,
+                    function(x) fisher.test(gg$HPV_status_temp, gg[,x])$p.value)
+
+ff <- pathways_wes %>%
+  gather(key= Gene_Name, value= alteration, -c(patient, sample)) %>% 
+  filter(alteration!= "noAlteration") %>%
+  left_join(clinical_data_rm_wes %>% select(patient, HPV_status_temp)) %>% 
+  group_by(HPV_status_temp, Gene_Name) %>%
+  count() %>% 
+  spread(key= HPV_status_temp, value= n)
+ff[is.na(ff)] <- 0
+
+ff <- ff %>% mutate(Negative_freq = Negative/202*100)%>%
+  mutate(Positive_freq = Positive/51*100)  %>% mutate(diff_freq = Negative_freq - Positive_freq)
+
+
+ff <- ff %>% left_join(cc %>% filter(!is.na(pvalue))%>% select(Gene_Name, pvalue))
+
+
+ff <- ff %>% mutate(tot = sum(Negative, Positive)) %>% mutate(tot_freq = tot/253*100)
+```
+
+```{r}
+#Figure 2D) Genomic alterations in pathways according to HPV status
+ff <- ff %>% filter(Gene_Name != "DNA_repair_long")
+ff$Gene_Name[ff$Gene_Name == "DNA_repair"] <- "DNA repair"
+ff$Gene_Name[ff$Gene_Name == "cell_cycle"] <- "Cell cycle"
+ff$Gene_Name[ff$Gene_Name == "HIPPO"] <- "Hippo"
+ff$Gene_Name[ff$Gene_Name == "TP53"] <- "p53"
+ff$Gene_Name[ff$Gene_Name == "NOTCH"] <- "Notch"
+ff$Gene_Name[ff$Gene_Name == "MYC"] <- "Myc"
+ff$Gene_Name[ff$Gene_Name == "WNT"] <- "Wnt"
+ff$Gene_Name[ff$Gene_Name == "NRF2"] <- "Nrf2"
+
+df_l <- ff %>% select(Gene_Name, Negative_freq, Positive_freq) %>% gather(key= HPV_status, value= Frequence, -Gene_Name) 
+df_l$HPV_status <- factor(df_l$HPV_status, levels= c( "Negative_freq", "Positive_freq"))
+levels(df_l$HPV_status) <- c("HPV-negative" ,"HPV-positive")
+
+ff <- ff %>% arrange(desc(Negative))
+df_l$Gene_Name <- factor(df_l$Gene_Name, levels= ff$Gene_Name)
+ann_dat_text <- df_l %>% left_join(ff %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>% 
+  mutate(pp= case_when( HPV_status == "HPV-positive" ~NA,
+                        pvalue > 0.05 ~NA,
+                        Gene_Name== "Cell cycle" ~"p=9e-12",
+                        
+                        Gene_Name== "p53" ~"p=1e-12",
+                        TRUE~ paste("p=", round(pvalue,3 ), sep = ""))) %>% 
+  mutate(Frequence= 90)
+df_l <- df_l %>% mutate(Pathways = "Pathways")
+ggplot(df_l, aes(x = Gene_Name, y = Frequence, fill = HPV_status)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) +
+  facet_wrap( ~ "Pathways") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +  labs(x = "Oncogenic pathways", y = "Percentage of patients", fill = "") +
+  scale_fill_manual(values = c("#999999", "red"))  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 6),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 7, angle = 0),
+    plot.title = element_blank(),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7)
+  ) + theme(
+    legend.position = c(0.9, 0.7),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  )
+```
+
+```{r}
+clinical_data_rm_wes$Consumption <- factor(clinical_data_rm_wes$Consumption)
+levels(clinical_data_rm_wes$Consumption) <- c("Non smoker non drinker", "Smoker and/or drinker")
+
+col <- clinical_data_rm_wes %>% filter(HPV_status_temp== "Positive")
+hpv_no16 <- data.frame("patient" = c("0439", "1238", "1247", "1665", "0847", "1174"),
+                       "strain" = c("HPV31", "HPV35", "HPV33", "HPV33", "HPV33", "HPV45"))
+hpv_strain <- clinical_data_rm_wes$HPV_status_temp
+hpv_strain[clinical_data_rm_wes$HPV_status_temp == "Positive"] <- "HPV16"
+hpv_strain[sapply(hpv_no16$patient, function(x) grep(x, rownames(clinical_data_rm_wes)))] <- hpv_no16$strain
+col$Virus <- hpv_strain[clinical_data_rm_wes$HPV_status_temp == "Positive"]
+
+rownames(col) <- col$patient
+
+
+muta <- mutations_type %>% filter(patient %in% col$patient)
+muta_n <- muta %>% 
+  select(-sample) %>%
+  gather(key = gene, value= alteration, -patient) %>% 
+  filter(alteration != "WT") %>% 
+  group_by(gene) %>% 
+  count() %>% 
+  filter(n  >1)
+
+rownames(muta) <- NULL
+muta <- column_to_rownames(muta, "patient")
+muta <- muta %>% select(muta_n$gene)
+muta_t <- t(muta)
+muta_t <- as.data.frame(muta_t)
+
+muta_t[muta_t == "WT"] <- NA
+molecular <- molecular_scores[rownames(muta),]
+
+col <- col %>% arrange(patient)
+muta_t <- muta_t %>% select(col$patient)
+molecular <- molecular %>% arrange(patient)
+rownames(molecular) <- molecular$patient
+
+```
+
+```{r}
+#Figure S3B) Oncoprint with HPV subtypes
+cnv <- cnv_wes %>% filter(patient %in% col$patient)
+cnv_n <- cnv %>% 
+  select(-sample) %>%
+  gather(key = gene, value = alteration, -patient) %>%
+  filter(alteration != "noCNA") %>% 
+  group_by(gene) %>% 
+  count() %>% 
+  filter(n  > 1)
+
+rownames(cnv) <- NULL
+cnv <- column_to_rownames(cnv, "patient")
+cnv <- cnv %>% select(cnv_n$gene)
+cnv_t <- t(cnv)
+cnv_t <- as.data.frame(cnv_t)
+
+cnv_t[cnv_t == "noCNA"] <- NA
+
+cnv_t <- cnv_t %>% select(colnames(muta_t))
+driver_alt <- rbind(cnv_t, muta_t)
+
+genes <- as.data.frame(rownames(driver_alt))
+colnames(genes)[1] <- "genes"
+genes <- genes %>% mutate(gr = case_when(genes %in% rownames(cnv_t) ~ "CNA", TRUE ~ "Mutation"))
+
+genes$gr <- factor(genes$gr, levels = c("Mutation", "CNA"))
+
+
+driver_alt[driver_alt == "Non-sens with NMD"] <- "Non-sense with NMD"
+
+cnv_t <- cnv_t %>% mutate(gene = rownames(cnv_t))
+
+rownames(cnv_t)[rownames(cnv_t) == "FGF3"] <- "11q13.3"
+cnv_t <-  cnv_t %>% filter(!gene %in% c("CCND1", "FGF4", "FGF19"))
+cnv_t <-  cnv_t %>% select(-gene)
+colnames(cnv_t) == colnames(muta_t)
+driver_alt <- rbind(cnv_t, muta_t)
+
+genes <- as.data.frame(rownames(driver_alt))
+colnames(genes)[1] <- "genes"
+genes <- genes %>% mutate(gr = case_when(genes %in% rownames(cnv_t) ~ "CNA", TRUE ~ "Mutation"))
+
+genes$gr <- factor(genes$gr, levels = c("Mutation", "CNA"))
+
+driver_alt[driver_alt == "Non-sens with NMD"] <- "Non-sense with NMD"
+
+ha_clinical <- HeatmapAnnotation(
+  'Primary disease' = col$Prim_diagnosis,
+  'Substance abuse' = col$Consumption,
+  "HPV type" = col$Virus,
+  annotation_name_side = "right",
+  gp = gpar(col = "white", fontsize = 8),
+  annotation_name_gp = gpar(fontsize = 8),
+  col = list(
+    'Primary disease' = c(
+      "Oral_cavity" = "#fdc086" ,
+      "Oropharynx" = "#beaed4",
+      "Hypopharynx" = "#7fc97f",
+      "Larynx" = "#ffff99"
+    ),
+    'Substance abuse' = c(
+      "Smoker and/or drinker" = "#737373",
+      "Non smoker non drinker" = "#d9d9d9"
+    ),
+    "HPV type" = c(
+      "HPV16" = "#74a9cf",
+      "HPV31" = "#a6d854",
+      "HPV33" = "#33a02c",
+      "HPV45" = "#f768a1",
+      "HPV35" = "red",
+      "Unknown" = "grey"
+    )
+  ),
+  annotation_legend_param =  list(
+    title_gp = gpar(fontsize = 8, fontface = "bold"),
+    labels_gp = gpar(fontsize = 8)
+  ),
+  show_legend = TRUE,
+  show_annotation_name = TRUE,
+  TMB = anno_barplot(
+    molecular$tmb,
+    axis_param = list(gp = gpar(fontsize = 6)),
+    ylim = c(0, 32)
+  ),
+  na_col = "grey"
+)
+
+
+col_f <-  c(
+  Frameshift = "#ff7f00",
+  "Inframe in_del" = "#377eb8",
+  "Non-sense with NMD" = "#e7298a",
+  "Splice site" = "#ffff33" ,
+  Missense = "#4daf4a",
+  'Multi-Hit' = "#984ea3",
+  Promoter = "#a65628",
+  Amplification = "#e41a1c",
+  Deletion = "#034e7b"
+)
+
+ht_alt <- oncoPrint(
+  driver_alt,
+  alter_fun = list(
+    background = function(x, y, w, h) {
+      grid.rect(x,
+                y,
+                w - unit(2, "pt"),
+                h - unit(2, "pt"),
+                gp = gpar(fill = "#f0f0f0", col = NA))
+    } ,
+    Frameshift = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Frameshift"], col = NA)),
+    "Inframe in_del" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Inframe in_del"], col = NA)),
+    Missense = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Missense"], col = NA)),
+    "Non-sense with NMD" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Non-sense with NMD"], col = NA)),
+    "Splice site" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Splice site"], col = NA)),
+    "Promoter" = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Promoter"], col = NA)),
+    'Multi-Hit' = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f['Multi-Hit'], col = NA)) ,
+    Amplification = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Amplification"], col = NA)),
+    Deletion = function(x, y, w, h)
+      grid.rect(x, y, w * 0.9, h * 0.9, gp = gpar(fill = col_f["Deletion"], col = NA))
+  ),
+  col = col_f,
+  right_annotation = NULL ,
+  row_names_side = "left",
+  pct_side = "right",
+  row_title = c("Most frequent mutated genes", "Most frequent CNA"),
+  row_title_side = "left",
+  show_column_names = FALSE,
+  row_title_gp = gpar(fontsize = 10),
+  border = TRUE,
+  row_names_gp = gpar(fontsize = 7) ,
+  pct_gp = gpar(fontsize = 7),
+  heatmap_legend_param = list(
+    title = "Alteration",
+    title_gp = gpar(fontsize = 8, fontface = "bold")
+  ),
+  #labels_gp = gpar(fontsize =8 ) ),
+  top_annotation = ha_clinical,
+  row_split = genes$gr
+)
+
+draw(ht_alt, merge_legend = TRUE)
+decorate_annotation("TMB", {
+  grid.lines(c(0, 1), unit(c(10, 10), "native"), gp = gpar(lty = 2, col = "red"))
+})
+```
+
+## Consumption & primary location analyses
+
+```{r}
+#Function to compute differences in genomic features according to a clinical variable
+compute_wes_freqs <- function(input_matrix, coldata, alteration_name, second_matrix, clin_var) {
+  coldata$clin_var <- coldata[, clin_var]
+  cc <- input_matrix %>% filter(patient %in% coldata$patient)%>% select(-patient)%>% gather(key= Gene_Name, value= alteration, -sample) %>% filter(alteration!= alteration_name) %>% select(-sample) %>% unique()
+  gg <- coldata %>% select(patient, clin_var) %>% left_join(second_matrix %>% select(patient, cc$Gene_Name))
+  cc <- cc %>% mutate(pvalue = NA)
+  ccc <- cc[1,]
+  ccc <- rbind(ccc,  ccc)
+  ccc <- rbind(ccc,cc)
+  
+  if (clin_var == "max_line_before_Rbiopsy_si") {
+    for (i in 3:dim(gg)[2]) {
+      gg[,i] <- factor(gg[,i])
+      mod <- glm( gg[,i] ~as.numeric(as.factor(clin_var)), data= gg, family = "binomial")
+      ccc$pvalue[i] <- summary(mod)$coefficient[2,4]
+    } 
+  } else {
+      for (i in 3:dim(gg)[2]) {
+        z <- fisher.test(gg$clin_var , gg[,i], alternative= "two.sided")
+        ccc$pvalue[i] <- (z$p.value)
+      }
+  }
+  
+  ccc <- ccc %>% filter(!is.na(pvalue))
+  ff <- input_matrix %>% filter(patient %in% coldata$patient) %>% gather(key= Gene_Name, value= alteration, -c(patient, sample) )%>% filter(alteration!= alteration_name)  %>% left_join(coldata %>% select(patient, clin_var)) %>% group_by(clin_var, Gene_Name) %>% count() %>%  spread(key= clin_var, value= n)
+  ff[is.na(ff)] <- 0
+
+  if (clin_var == "Metastatic_at_Rbiopsy") {
+    ff <- ff %>% mutate(No_freq = No/67*100)%>%
+    mutate(Yes_freq = Yes/135*100)  %>% mutate(diff_freq = No_freq - Yes_freq)
+
+
+    ff <- ff %>% left_join(ccc %>% filter(!is.na(pvalue))%>% select(Gene_Name, pvalue))
+    ff <- ff %>% mutate(tot = sum(No, Yes)) %>% mutate(tot_freq = tot/202*100)
+  } else if (clin_var == "Consumption") {
+    ff <- ff %>% mutate(Smoker_and_or_drinker_freq = Smoker_and_or_drinker/177*100)%>%
+    mutate(Non_smoker_non_drinker_freq = Non_smoker_non_drinker/24*100)  %>% mutate(diff_freq = Smoker_and_or_drinker_freq - Non_smoker_non_drinker_freq)
+
+    ff <- ff %>% left_join(ccc %>% filter(!is.na(pvalue))%>% select(Gene_Name, alteration,pvalue))
+
+    ff <- ff %>% mutate(tot = sum(Smoker_and_or_drinker, Non_smoker_non_drinker)) %>% mutate(tot_freq = tot/201*100)
+  } else if (clin_var == "Prim_diagnosis") {
+    ff <- ff %>% mutate(Oral_freq = Oral_cavity/52*100)%>%
+    mutate(Oropharynx_freq = Oropharynx/75*100)%>%
+    mutate(Hypopharynx_freq =Hypopharynx/44*100)%>%
+    mutate(Larynx_freq =Larynx/31*100)
+    ff <- ff %>% left_join(ccc %>% filter(!is.na(pvalue))%>% select(Gene_Name, alteration, pvalue))
+    ff <- ff%>% mutate(tot = sum(Oral_cavity, Oropharynx, Larynx, Hypopharynx)) %>% mutate(tot_freq = tot/202*100)
+  } else if (clin_var == "max_line_before_Rbiopsy_si") {
+    colnames(ff) <- c("Gene_Name", "M", "RM_0", "RM_1", "RM_2", "RM_3", "RM_4")
+    ff <- ff %>% mutate(M_freq = M /15*100)%>%
+      mutate(RM_0_freq = RM_0 /41*100)%>%
+      mutate(RM_1_freq = RM_1 /34*100)%>%
+      mutate(RM_2_freq = RM_2 /58*100)%>%
+      mutate(RM_3_freq = RM_3 /41*100)%>%
+      mutate(RM_4_freq = RM_4 /13*100)
+  
+    ff <- ff %>% left_join(ccc %>% select(Gene_Name, alteration, pvalue))
+    ff <- ff %>% mutate(tot = sum(RM_0, RM_1, RM_2, RM_3, RM_4)) %>% mutate(tot_freq = tot/202*100)
+  }
+  
+  return(ff)
+}
+```
+
+```{r}
+#Compute differences according to consumption
+colda_WES <- clinical_data_rm_wes %>% filter(HPV_status_temp== "Negative")
+colda_WES$Consumption <- factor(colda_WES$Consumption)
+levels(colda_WES$Consumption) <- c('Non_smoker_non_drinker', 'Smoker_and_or_drinker')
+colda_WES <- colda_WES %>% filter(Consumption != "")
+ff_mut <- compute_wes_freqs(snv_wes, colda_WES, 'WT', mutations, "Consumption")
+ff_mut <- ff_mut %>% mutate(type= "mut")
+
+ff_cnv <- compute_wes_freqs(cnv_wes, colda_WES, 'noCNA', CNV, "Consumption")
+ff_cnv <- ff_cnv %>% mutate(type= "cnv")
+
+ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, "Consumption")
+ff_path <- ff_path %>% mutate(type= "Pathway")
+
+```
+
+```{r}
+#Figure 3A) Genomic features affected by consumption
+ff_mut <- ff_mut %>% mutate(alteration = "")
+ff_path <- ff_path %>% mutate(alteration = "")
+ff_tot <- rbind(ff_mut %>% filter(pvalue < 0.05), ff_cnv %>% filter(pvalue < 0.05))
+ff_tot <- rbind(ff_tot, ff_path %>% filter(pvalue < 0.05))
+
+ff_tot$Gene_Name[ff_tot$Gene_Name == "FGF3"] <- "11q13"
+ff_tot <- ff_tot %>% filter(!Gene_Name %in% c("FGF4", "FGF19", "CCND1"))
+ff_total <- ff_tot
+
+ff_tot <- ff_tot %>% select(Gene_Name,
+                            Smoker_and_or_drinker_freq,
+                            Non_smoker_non_drinker_freq,
+                            type) %>% gather(key = group, value = Frequence, -c(type, Gene_Name))
+
+
+ff_tot$group <- factor(ff_tot$group)
+levels(ff_tot$group) <-  c("Non smokers non drinkers", "Smokers and/or drinkers")
+
+ff_tot$type <- factor(ff_tot$type, levels = c("mut", "cnv", "Pathway"))
+levels(ff_tot$type) <- c("Mutations", "CNV", "Pathways")
+
+ff_tot$Gene_Name[ff_tot$Gene_Name == "11q13"] <- "11q13.3 amp"
+ff_tot$Gene_Name[ff_tot$Gene_Name == "CYLD"] <- "CYLD del"
+
+
+ann_dat_text <- ff_total %>% select(Gene_Name, tot_freq, pvalue)
+colnames(ann_dat_text)[2] <- "Frequence"
+ann_dat_text$Gene_Name[ann_dat_text$Gene_Name == "11q13"] <- "11q13.3 amp"
+ann_dat_text$Gene_Name[ann_dat_text$Gene_Name == "CYLD"] <- "CYLD del"
+
+
+ff_total$Gene_Name[ff_total$Gene_Name == "11q13"] <- "11q13.3 amp"
+ff_total$Gene_Name[ff_total$Gene_Name == "CYLD"] <- "CYLD del"
+
+
+ann_dat_text3 <- ff_tot %>% left_join(ff_total %>% select(Gene_Name, pvalue))
+
+ann_dat_text3 <- ann_dat_text3 %>%
+  mutate(
+    pp = case_when(
+      Gene_Name == "11q13.3 amp" &
+        group == "Smokers and/or drinkers" ~ paste("p=", round(pvalue, 3), sep = ""),
+      Gene_Name == "11q13.3 amp" &
+        group == "Non smokers non drinkers" ~ as.character(NA),
+      Gene_Name != "11q13.3 amp" &
+        group == "Smokers and/or drinkers" ~ as.character(NA),
+      Gene_Name != "11q13.3 amp" &
+        group == "Non smokers non drinkers" ~ paste("p=", round(pvalue, 3), sep = "")
+    )
+  ) %>%
+  mutate(Frequence = 51)
+
+ggplot(ff_tot , aes(x = Gene_Name, y = Frequence, fill = group)) + 
+  geom_bar(stat = "identity",  position = "dodge", width = 0.6) + 
+  geom_text(data = ann_dat_text3, label = ann_dat_text3$pp, size = 2.8) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  facet_grid( ~ type, scales = "free_x", space = "free_x") +
+  scale_fill_manual(values = c("#737373", "#bdbdbd")) +
+  theme_bw() +
+  labs(x = "", y = "Percentage of patients", fill = "Substance abuse") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  )
+
+```
+
+```{r}
+#Compute differences according to primary diagnosis site
+colda_WES <- clinical_data_rm_wes %>% filter(HPV_status_temp== "Negative")
+ff_mut <- compute_wes_freqs(snv_wes, colda_WES, 'WT', mutations, "Prim_diagnosis")
+
+ff_cnv <- compute_wes_freqs(cnv_wes, colda_WES, 'noCNA', CNV, "Prim_diagnosis")
+
+ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, "Prim_diagnosis")
+
+```
+
+```{r}
+#Figure 3B) Genomic features affected by primary diagnosis site
+ff_mut <- ff_mut %>% mutate(alteration = "") %>% mutate(type = "Mutations") %>% filter(Gene_Name != "HLA.A")
+ff_path <- ff_path %>% mutate(alteration = "") %>% mutate(type = "Pathway")
+ff_cnv <- ff_cnv %>% mutate(type = "CNV") %>% filter(Gene_Name != "HLA.A")
+ff_tot <- rbind(ff_mut %>% filter(pvalue < 0.05), ff_cnv %>% filter(pvalue < 0.05))
+ff_tot <- rbind(ff_tot, ff_path %>% filter(pvalue < 0.05))
+
+ff_tot$Gene_Name[ff_tot$Gene_Name == "FGF3"] <- "11q13.3 amp"
+ff_tot <- ff_tot %>% filter(!Gene_Name %in% c("FGF4", "FGF19", "CCND1", "CUL3"))
+ff_tot$Gene_Name[ff_tot$Gene_Name == "AKT2"] <- "AKT2 amp"
+ff_tot$Gene_Name[ff_tot$Gene_Name == "FGF23"] <- "FGF23 amp"
+ff_tot$Gene_Name[ff_tot$Gene_Name == "TBL1XR1"] <- "TBL1XR1 amp"
+ff_tot$Gene_Name[ff_tot$Gene_Name == "cell_cycle"] <- "Cell cycle"
+ff_total <- ff_tot
+
+ff_tot <- ff_tot %>% select(Gene_Name,
+                            Oral_freq,
+                            Oropharynx_freq,
+                            Hypopharynx_freq,
+                            Larynx_freq,
+                            type) %>% gather(key = group, value = Frequence, -c(type, Gene_Name))
+ff_tot$group <- factor(
+  ff_tot$group,
+  levels = c(
+    "Oral_freq" ,
+    "Oropharynx_freq",
+    "Hypopharynx_freq" ,
+    "Larynx_freq"
+  )
+)
+levels(ff_tot$group) <-  c("Oral cavity" , "Oropharynx", "Hypopharynx" , "Larynx")
+
+ff_tot$type <- factor(ff_tot$type, levels = c("Mutations", "CNV", "Pathway"))
+levels(ff_tot$type) <- c("Mutations", "CNV", "Pathways")
+
+ann_dat_text <- ff_tot %>% left_join(ff_total %>% select(Gene_Name, pvalue))
+
+ann_dat_text_mut <- ann_dat_text %>%
+  filter(type == "Mutations") %>%
+  mutate(pp = case_when(group == "Oropharynx" ~ paste("p=", round(pvalue, 3), sep = ""))) %>%
+  mutate(Frequence = 15)
+
+ann_dat_text_cnv <- ann_dat_text %>% filter(type == "CNV") %>%
+  mutate(
+    pp = case_when(
+      group == "Oropharynx" &
+        Gene_Name == "AKT2 amp" ~ paste("p=", round(pvalue, 3), sep = ""),
+      group == "Oropharynx" &
+        Gene_Name == "11q13.3 amp" ~ paste("p=", round(pvalue, 5), sep = ""),
+      group == "Oropharynx" &
+        Gene_Name == "FGF23 amp" ~ paste("p=", round(pvalue, 3), sep = ""),
+      group == "Oropharynx" &
+        Gene_Name == "TBL1XR1 amp" ~ paste("p=", round(pvalue, 3), sep = "")
+    )
+  ) %>%
+  mutate(Frequence = 77)
+
+ann_dat_text_path <- ann_dat_text %>% filter(type == "Pathways") %>%
+  mutate(pp = case_when(group == "Oropharynx"  ~ paste("p=", round(pvalue, 3), sep = ""))) %>%
+  mutate(Frequence = 92)
+
+ggplot(
+  ff_tot %>% filter(type == "Mutations"),
+  aes(
+    x = Gene_Name,
+    y = Frequence,
+    fill = group,
+    col = group
+  )
+) + geom_bar(stat = "identity",
+             position = "dodge",
+             width = 0.6) +
+  geom_text(
+    data = ann_dat_text_mut,
+    label = ann_dat_text_mut$pp,
+    size = 2.8 ,
+    color = "black"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
+  facet_grid( ~ type, scales = "free", space = "free") +
+  scale_fill_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  scale_color_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  theme_bw(base_family = "Helvetica") +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Primary location" ,
+       col = "Primary location") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.position = "right",
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  )
+
+ggplot(ff_tot %>% filter(type == "CNV"),
+       aes(
+         x = Gene_Name,
+         y = Frequence,
+         fill = group,
+         col = group
+       )) + geom_bar(stat = "identity",
+                     position = "dodge",
+                     width = 0.6) +
+  geom_text(
+    data = ann_dat_text_cnv,
+    label = ann_dat_text_cnv$pp,
+    size = 2.8,
+    color = "black"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  facet_grid( ~ type, scales = "free", space = "free") +
+  scale_fill_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  scale_color_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  theme_bw() +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Primary location" ,
+       col = "Primary location") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm"),
+    legend.position = "right",
+    
+  )
+
+
+ggplot(
+  ff_tot %>% filter(type == "Pathways"),
+  aes(
+    x = Gene_Name,
+    y = Frequence,
+    fill = group,
+    col = group
+  )
+) + geom_bar(stat = "identity",
+             position = "dodge",
+             width = 0.6) +
+  geom_text(
+    data = ann_dat_text_path,
+    label = ann_dat_text_path$pp,
+    size = 2.8,
+    color = "black"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  facet_grid( ~ type, scales = "free", space = "free") +
+  scale_fill_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  theme_bw() +
+  scale_color_manual(values = c("#ff7f00", "#cab2d6", "#33a02c", "#fed976")) +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Primary location" ,
+       col = "Primary location") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) 
+```
+
+```{r}
+#Figure S4A) Relation between genomic parameters and consumption 
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative" & !is.na(clinical_data_rm_wes$Consumption),]  %>%
+  ggplot(aes(clinical_data_rm_wes$Consumption[clinical_data_rm_wes$HPV_status_temp == "Negative" & !is.na(clinical_data_rm_wes$Consumption)] , tmb)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "TMB (mutations/Mb)") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
+                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Consumption[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Ploidy") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
+                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
+
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Consumption[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Fraction genome altered") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
+                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
+```
+
+```{r}
+#Figure S4B) Effect of diagnosis site on genomic parameters
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "TMB (mutations/Mb)") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Ploidy") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Fraction genome altered") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
+```
+
+## Metastatic vs locoregional analyses
+
+```{r}
+#Compute effect of disease extent on genomic features
+colda_WES <- clinical_data_rm_wes %>% filter(HPV_status_temp== "Negative")
+ff_mut <- compute_wes_freqs(snv_wes, colda_WES, 'WT', mutations, "Metastatic_at_Rbiopsy")
+ff_cnv <- compute_wes_freqs(cnv_wes, colda_WES, 'noCNA', CNV, "Metastatic_at_Rbiopsy")
+ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, "Metastatic_at_Rbiopsy")
+```
+
+```{r}
+#Figure 5A) Genomic features affected by disease extent
+ff_mut <- ff_mut %>% mutate(alteration = "") %>% mutate(type = "Mutations")
+ff_path <- ff_path %>% mutate(alteration = "") %>% mutate(pval_adj_3p = NA) %>% mutate(type = "Pathway")
+ff_cnv <- ff_cnv %>% mutate(type = "CNV") %>% filter(!Gene_Name %in% c("HLA.A", "HLA.B", "HLA.C"))
+ff_tot <- rbind(ff_mut %>% filter(pvalue < 0.05), ff_cnv %>% filter(pvalue < 0.05))
+ff_tot <- rbind(ff_tot, ff_path %>% filter(pvalue < 0.05))
+
+ff_tot$Gene_Name[ff_tot$Gene_Name == "FGF3"] <- "11q13.3 amp"
+ff_tot <- ff_tot %>% filter(!Gene_Name %in% c("FGF4", "FGF19", "CCND1"))
+ff_tot <- ff_tot %>% filter(!Gene_Name %in% c("cell_cycle", "CDKN2A", "CDKN2B", "MTAP")) ## not significant after multivariate
+
+ff_total <- ff_tot
+
+ff_tot <- ff_tot %>% select(Gene_Name, No_freq, Yes_freq , type) %>%
+  gather(key = group, value = Frequence, -c(type, Gene_Name))
+ff_tot$group <- factor(ff_tot$group, levels = c("Yes_freq", "No_freq"))
+levels(ff_tot$group) <-  c("Distant metastatic disease", "Locoregional only disease")
+
+ff_tot$type <- factor(ff_tot$type, levels = c("Mutations", "CNV", "Pathway"))
+levels(ff_tot$type) <- c("Mutations", "CNV", "Pathways")
+ann_dat_text <- ff_tot %>% left_join(ff_total %>% select(Gene_Name, pvalue))
+
+ann_dat_text <- ann_dat_text  %>%
+  mutate(
+    pp = case_when(
+      group == "Locoregional only disease" &
+        Gene_Name == "11q13.3 amp" ~ paste("p=", round(pvalue, 5), sep = ""),
+      group == "Locoregional only disease" ~ paste("p=", round(pvalue, 3), sep = "")
+    )
+  ) %>%
+  mutate(Frequence = 60)
+
+
+ggplot(ff_tot , aes(
+  x = Gene_Name,
+  y = Frequence,
+  fill = group,
+  col = group
+)) + geom_bar(stat = "identity",
+              position = "dodge",
+              width = 0.6) +
+  geom_text(
+    data = ann_dat_text,
+    label = ann_dat_text$pp,
+    size = 2.8 ,
+    color = "black"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  facet_grid( ~ type, scales = "free", space = "free") +
+  theme_bw() +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Disease extent" ,
+       col = "Disease extent") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) 
+```
+
+```{r}
+#Figure S5A) Genomic parameters according to disease extent in HPV-negative patients
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "TMB (mutations/Mb)") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Ploidy") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Fraction genome altered") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+```
+
+```{r}
+#Figure S5B) Genomic parameters according to disease extent in HPV-positive patients
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[clinical_data_rm_wes$HPV_status_temp == "Positive"] , tmb)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "TMB (mutations/Mb)") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Ploidy") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+
+molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
+  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Fraction genome altered") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) +
+  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
+```
+
+## R/M treatment lines analyses
+
+```{r}
+#Compute genomic features affected by treatment lines
+colda_WES <- clinical_data_rm_wes %>% filter(HPV_status_temp == "Negative")
+
+ff_mut <- compute_wes_freqs(snv_wes, colda_WES, 'WT', mutations, "max_line_before_Rbiopsy_si")
+
+ff_cnv <- compute_wes_freqs(cnv_wes, colda_WES, 'noCNA', CNV, "max_line_before_Rbiopsy_si")
+
+ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, "max_line_before_Rbiopsy_si")
+```
+
+```{r}
+#Figure 6B) Genomic features affected by treatment lines
+ff_mut <- ff_mut %>% mutate(alteration= "") %>% mutate(type= "Mutations")
+ff_path <- ff_path %>% mutate(alteration= "") %>% mutate(type = "Pathways")
+ff_cnv <- ff_cnv %>% mutate(type= "CNV")
+ff_tot <- rbind(ff_mut %>% filter(pvalue <0.05), ff_cnv %>% filter(pvalue< 0.05))
+ff_tot <- rbind(ff_tot, ff_path %>% filter(pvalue < 0.05))
+
+ff_tot <- ff_tot %>% filter(!Gene_Name%in% c("CDKN2A", "FGF3", "FGF4", "FGF19", "CCND1", "RPS6KB2")) ## not significant after multivariate
+
+ff_total <- ff_tot
+
+ff_tot <- ff_tot %>% select(Gene_Name,
+                            M_freq,
+                            RM_0_freq,
+                            RM_1_freq,
+                            RM_2_freq,
+                            RM_3_freq,
+                            RM_4_freq ,
+                            type) %>%
+  gather(key = group, value = Frequence, -c(type, Gene_Name))
+
+ff_tot$group <- factor(ff_tot$group)
+levels(ff_tot$group) <-  c("M naive","0", "1", "2", "3", ">3" )
+
+ff_tot$type <- factor(ff_tot$type, levels= c( "Mutations","CNV", "Pathways"))
+
+ff_tot$Gene_Name[ff_tot$Gene_Name == "cell_cycle"] <- "Cell cycle"
+
+
+ggplot(
+  ff_tot %>% filter(type == "Mutations") ,
+  aes(
+    x = Gene_Name,
+    y = Frequence,
+    fill = group,
+    col = group
+  )
+) + geom_bar(stat = "identity",
+             position = "dodge",
+             width = 0.6) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
+  facet_grid( ~ type, scales = "free", space = "free") +
+  theme_bw(base_family = "Helvetica") +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Number R/M line" ,
+       col = "Number R/M line") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  annotate(
+    "text",
+    x = 1,
+    y = 24,
+    label = "p= 0.03",
+    size = 2.8
+  )
+
+ggplot(ff_tot %>% filter(type == "CNV") ,
+       aes(
+         x = Gene_Name,
+         y = Frequence,
+         fill = group,
+         col = group
+       )) + geom_bar(stat = "identity",
+                     position = "dodge",
+                     width = 0.6) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  facet_grid( ~ type, scales = "free", space = "free") +
+  theme_bw(base_family = "Helvetica") +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Number R/M line" ,
+       col = "Number R/M line") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  annotate(
+    "text",
+    x = 1,
+    y = 36,
+    label = "p= 0.01",
+    size = 2.8
+  ) +
+  annotate(
+    "text",
+    x = 2,
+    y = 36,
+    label = "p= 0.03",
+    size = 2.8
+  ) +
+  annotate(
+    "text",
+    x = 3,
+    y = 36,
+    label = "p= 0.02",
+    size = 2.8
+  )
+
+
+ggplot(
+  ff_tot %>% filter(type == "Pathways") ,
+  aes(
+    x = Gene_Name,
+    y = Frequence,
+    fill = group,
+    col = group
+  )
+) + geom_bar(stat = "identity",
+             position = "dodge",
+             width = 0.6) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
+  facet_grid( ~ type, scales = "free", space = "free") +
+  theme_bw() +
+  labs(x = "",
+       y = "Percentage of patients",
+       fill = "Number R/M line" ,
+       col = "Number R/M line") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 7),
+    axis.title.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    plot.title = element_text(size = 10),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    strip.text.x = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.2, "cm")
+  ) +
+  annotate(
+    "text",
+    x = 1,
+    y = 100,
+    label = "p= 0.002",
+    size = 2.8
+  ) +
+  annotate(
+    "text",
+    x = 2,
+    y = 100,
+    label = "p= 0.01",
+    size = 2.8
+  )
+
+```
+
+```{r}
+#Figure 6A) Effect of treatment lines in genomic parameters in HPV-negative patients
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative", ]  %>%
+  ggplot(aes(clinical_data_rm_wes$max_line_before_Rbiopsy_si[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) +
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "TMB (mutations/Mb)") +
+  theme(text = element_text(size = 18)) +
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative" &
+                   samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" , ]  %>%
+  ggplot(aes(clinical_data_rm_wes$max_line_before_Rbiopsy_si[clinical_data_rm_wes$HPV_status_temp == "Negative" &  samples_data_rm_wes$specimen_type == "Fresh Frozen tissue"] , ploidy)) +
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "Ploidy") +
+  theme(text = element_text(size = 18)) +
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative" &
+                   samples_data_rm_wes$specimen_type == "Fresh Frozen tissue", ]  %>%
+  ggplot(aes(
+    clinical_data_rm_wes$max_line_before_Rbiopsy_si[clinical_data_rm_wes$HPV_status_temp == "Negative" & samples_data_rm_wes$specimen_type == "Fresh Frozen tissue"] ,
+    CNA_altered
+  )) +
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "Fraction genome altered") +
+  theme(text = element_text(size = 18)) +
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+```

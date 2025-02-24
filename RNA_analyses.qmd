@@ -1,0 +1,1175 @@
+---
+title: "Article_I_RNAseq"
+format: html
+editor: visual
+---
+
+```{r}
+#Functions
+rand_imput <- function(x) {
+  return(sample(x[!is.na(x)],
+                length(which(is.na(x))),
+                replace = TRUE))
+}
+extract_best_pvalue <- function(clin_var, lm_summary) {
+  return(min(lm_summary$coefficients[grep(clin_var, rownames(lm_summary$coefficients)), 4]))
+}
+library(glue)
+univariate_model <- function(trans_feature, clin_variable, 
+                             unimodal = TRUE, threshold = 0) {
+  if (unimodal) {
+    feature_in_question_name <- glue("full_features[,'{trans_feature}']")
+  } else {
+    feature_in_question_name <- glue("as.numeric(as.factor(full_features[,'{trans_feature}'] > {threshold}))-1")
+  }
+  variables_to_correct <- c("specimen_type", "RNA_assay_library",
+                            "AssessmentDoneOn", "SampleSize_bin", "RNA_nucleic_acid_extraction")
+  f <- as.formula(paste(feature_in_question_name, 
+                        paste(c(clin_variable, variables_to_correct), collapse = " + "),
+                        sep = " ~ "))
+  return(f)
+}
+
+multivariate_model <- function(trans_feature, hpv_diffs_adj,
+                               unimodal = TRUE, threshold = 0) {
+  if (unimodal) {
+    feature_in_question_name <- glue("full_features[,'{trans_feature}']")
+  } else {
+    feature_in_question_name <- glue("as.numeric(as.factor(full_features[,'{trans_feature}'] > {threshold}))-1")
+  }
+  clin_samp_final_vars <- rownames(hpv_diffs_adj[hpv_diffs_adj[,trans_feature] < 0.05, ])
+  clin_samp_final_vars <- clin_samp_final_vars[!grepl("RNA|specimen", clin_samp_final_vars)]
+  variables_to_correct <- c("specimen_type", "RNA_assay_library",
+                            "AssessmentDoneOn", "SampleSize_bin", "RNA_nucleic_acid_extraction")
+  f <- as.formula(paste(feature_in_question_name, 
+                        paste(c(clin_samp_final_vars, variables_to_correct), collapse = " + "),
+                        sep = " ~ "))
+  return(f)
+}
+```
+
+```{r output = FALSE}
+#Libraries
+library(tidyr)
+library(DESeq2)
+library(GSVA)
+library(ggraph)
+library(tidygraph)
+library(dplyr)
+library(igraph)
+library(colourvalues)
+library(ggpubr)
+library(pheatmap)
+library(RColorBrewer)
+library(HGNChelper)
+library(sjPlot)
+```
+
+# RNAseq analyses
+
+Import and process necessary files
+
+```{r}
+#Import data
+raw_counts_IMMU_file <- "/home/daniel/IMMUCAN/SCCHN1/RNAseq/full_counts_HUGO_matrix.tsv"
+raw_counts_UPST_file <- "/home/daniel/IMMUCAN/Upstream/RNAseqCounts/full_counts_HUGO_matrix.tsv"
+samples_file <- "/home/daniel/IMMUCAN/Upstream/Metadata_Clinicaldata/coldata_samples_all_SCCHN_20240624.csv"
+clinical_file <- "/home/daniel/IMMUCAN/Upstream/Metadata_Clinicaldata/IMMUCAN_HN_298_20240821.csv"
+
+raw_counts_IMMU <- read.table(raw_counts_IMMU_file, header = TRUE,
+                           sep = "\t", row.names = 1, check.names = FALSE)
+raw_counts_UPST <- read.table(raw_counts_UPST_file, header = TRUE,
+                              sep = "\t", row.names = 1, check.names = FALSE)
+raw_counts <- cbind(raw_counts_IMMU, raw_counts_UPST)
+
+samples_data_raw <- read.csv(samples_file, sep = ";")
+samples_data_raw <- samples_data_raw[!duplicated(samples_data_raw$sample),]
+rownames(samples_data_raw) <- samples_data_raw$sample
+
+clinical_data_raw <- read.csv(clinical_file, sep = ";", row.names = 6)
+
+#Given that for some patients we have FFT & FFPE samples, we need to find the corresponding pairs
+#Infer FFPE metadata from the corresponding FFPE for FFT samples
+ffpe_rna_samples <- grep("FIXT", rownames(samples_data_raw), value = TRUE)
+fft_rna_samples <- grep("FFT", rownames(samples_data_raw), value = TRUE)
+#For each FFT sample, check if there is a corresponding FFPE sample and record the ID and sampling date
+test_ffpes <- sapply(gsub("-F.*", "", fft_rna_samples),
+                     function(sample_ids) sapply(grep(paste(sample_ids, "-FIXT",sep =""),
+                                                      rownames(samples_data_raw), value = TRUE),
+                                                 function(possible_ffpes) samples_data_raw[possible_ffpes, "SAMPDAT"])) 
+#Record the corresponding sampling date for the FFT samples
+same_date <- sapply(1:length(test_ffpes), 
+                    function(x) names(test_ffpes[[x]])[samples_data_raw[fft_rna_samples[x], "SAMPDAT"] == test_ffpes[[x]]])
+#Remove empty values
+common_fft_samples <- fft_rna_samples[!sapply(same_date, rlang::is_empty)]
+common_ffpe_samples <- same_date[!sapply(same_date, rlang::is_empty)]
+#For some cases, there are two identical FFPE samples, we randomly select the first one
+common_ffpe_samples <- unlist(lapply(common_ffpe_samples, function(x) x[[1]]))
+#Select samples with same biopsy site
+common_ffpe_samples_final <- common_ffpe_samples[samples_data_raw[common_fft_samples, "subsite_si"] == samples_data_raw[common_ffpe_samples, "subsite_si"]]
+common_fft_samples_final <- common_fft_samples[samples_data_raw[common_fft_samples, "subsite_si"] == samples_data_raw[common_ffpe_samples, "subsite_si"]]
+
+#Infer FFPE specific values whenever you can from the corresponding sample
+variables_to_replace_fft <- c( "AreaSizeval", 
+                               "TumorSurfaceAreaval", "AreaPercViaTumorCell",
+                               "AreaPercentNormalTis", "AreaPercentNecrosis",
+                               "AreaPercentStroma", "Fibrosis", "LymphocyteInfiltrat")
+samples_data_raw[common_fft_samples_final,
+             variables_to_replace_fft] <- samples_data_raw[common_ffpe_samples_final,
+                                                           variables_to_replace_fft]
+samples_data_raw[common_fft_samples_final,
+             "AssessmentDoneOn"] <- "Whole_slide"
+
+#Create binary variable for sample size
+samples_data_raw$SampleSize <- samples_data_raw$TumorSurfaceAreaval
+samples_data_raw$SampleSize_cont <- samples_data_raw$SampleSize
+samples_data_raw$SampleSize_cont[samples_data_raw$SampleSize_cont > median(samples_data_raw$SampleSize, na.rm = TRUE)] <- NA 
+samples_data_raw$SampleSize_bin <- factor(samples_data_raw$SampleSize > median(samples_data_raw$SampleSize, na.rm = TRUE))
+levels(samples_data_raw$SampleSize_bin) <- c("Small", "Big")
+
+#Some specific value transformations
+samples_data_raw[samples_data_raw == ">80%"] <- "80-100%"
+samples_data_raw[samples_data_raw == ""] <- NA
+samples_data_raw[samples_data_raw == "Not applicable"] <- NA
+samples_data_raw$RNA_assay_library[samples_data_raw$RNA_assay_library == "KAPA RNA HyperPrep with RiboErase (HMR) Globin (Roche)"] <- " KAPA RNA HyperPrep with RiboErase (HMR) (Roche)"
+samples_data_raw$RNA_assay_library[samples_data_raw$RNA_assay_library == "KAPA RNA HyperPrep with RiboErase (HMR) with KAPA Globin Depletion Hybridization Oligos (Roche)"] <- "KAPA (HMR) + Globin Depletion (Roche)"
+samples_data_raw$RNA_nucleic_acid_extraction[is.na(samples_data_raw$RNA_nucleic_acid_extraction)] <- "CNAG_kit"
+samples_data_raw$AreaPercentNecrosis[samples_data_raw$AreaPercentNecrosis != "0-30%"] <- "31-80%"
+samples_data_raw$AreaPercentNormalTis[samples_data_raw$AreaPercentNormalTis %in% c("51-80%", "80-100%")] <- "51-100%"
+samples_data_raw$AreaPercentStroma[samples_data_raw$AreaPercentStroma %in% c("51-80%", "80-100%")] <- "51-100%"
+clinical_data_raw$ECOG[clinical_data_raw$ECOG == 3] <- 2
+clinical_data_raw$max_line_before_Rbiopsy_si[clinical_data_raw$max_line_before_Rbiopsy_si == ">3"] <- "3+"
+clinical_data_raw$max_line_before_Rbiopsy_si[clinical_data_raw$RM_type == "M_naive"] <- "-1"
+clinical_data_raw$CPS_PDL1_si[clinical_data_raw$CPS_PDL1_si == ">=20"] <- "20+"
+clinical_data_raw$CPS_PDL1_si[clinical_data_raw$CPS_PDL1_si == "Jan-19"] <- "1-19"
+
+#Select RNA samples
+samples_data <- samples_data_raw[rownames(samples_data_raw) %in% colnames(raw_counts) &
+                               #samples_data$selection == "selected" &
+                               samples_data_raw$SAMP_timepoint %in% c("Registration", 
+                                                                  "UPSTREAM_Post_treatment"), ]
+
+#Remove duplicate samples: keep FFT (as it is the most reliable group)
+duplicates <- paste(names(table(samples_data$patient))[table(samples_data$patient) == 2], "-FIXT", sep = "")
+samples_data <- samples_data[-grep(paste(duplicates, collapse = "|"),rownames(samples_data)),]
+
+#Remove everything that is not R/M
+clinical_data_rm <- clinical_data_raw[rownames(clinical_data_raw) %in% gsub("-F.*", "", rownames(samples_data)),]
+clinical_data_rm <- clinical_data_rm[clinical_data_rm$Article_I == "Yes" ,]
+#Remove the RNAseq samples not matching correctly with the DNA
+clinical_data_rm <- clinical_data_rm[!grepl("0523", rownames(clinical_data_rm)),]
+samples_data_rm <- samples_data[samples_data$patient %in% rownames(clinical_data_rm),]
+samples_data_rm <- samples_data_rm[order(samples_data_rm$patient),]
+clinical_data_rm <- clinical_data_rm[order(rownames(clinical_data_rm)),]
+
+clinical_data_rm$FFPE_biopsy_zone_irradiated[grepl("FFT", rownames(samples_data_rm))] <- NA
+clinical_data_rm$Frozen_biopsy_zone_irradiated[grepl("FIXT", rownames(samples_data_rm))]  <- NA
+clinical_data_rm$Sample_irradiated <- clinical_data_rm$FFPE_biopsy_zone_irradiated
+clinical_data_rm$Sample_irradiated[is.na(clinical_data_rm$Sample_irradiated)] <- clinical_data_rm$Frozen_biopsy_zone_irradiated[is.na(clinical_data_rm$Sample_irradiated)]
+
+#RNAseq counts data
+raw_counts <- raw_counts[, rownames(samples_data_rm)]
+counts_HUGO_norm <- as.data.frame(vst(as.matrix(raw_counts)))
+
+```
+
+Select covariates for multivariate analysis
+
+```{r}
+relevant_covariates <- cbind(samples_data_rm[, c(
+  "specimen_type",
+  "samptype",
+  "AssessmentDoneOn",
+  "SampleSize_bin",
+  "RNA_assay_library",
+  "RNA_nucleic_acid_extraction",
+  "RNA_assay_vendor"
+)], clinical_data_rm[, c(
+  "Sex",
+  "Age_Rbiopsy",
+  "HPV_status_temp",
+  "Consumption",
+  "Prim_diagnosis",
+  "PRIM_diagnosis_grade_si",
+  "PRIM_diagnosis_stage_si",
+  "Metastatic_at_Rbiopsy",
+  "RM_type",
+  "max_line_before_Rbiopsy_si",
+  "surg_before_Rbiopsy",
+  "surg_multiple_before_Rbiopsy",
+  "RT_before_Rbiopsy",
+  "RT_multiple_before_Rbiopsy",
+  "Sample_irradiated",
+  "Platin_before_Rbiopsy",
+  "Taxanes_before_Rbiopsy",
+  "FU_before_Rbiopsy",
+  "AntiEGFR_before_Rbiopsy",
+  "Methotrexate_before_Rbiopsy",
+  "Gemcitabine_before_Rbiopsy",
+  "Other_ST_before_Rbiopsy",
+  "AntiPD1_before_Rbiopsy",
+  "AntiCTLA4_before_Rbiopsy",
+  "ICI_other_before_Rbiopsy",
+  "last_treatment_including_antiPD1",
+  "last_treatment_including_platin",
+  "last_treatment_including_FU",
+  "last_treatment_including_taxanes",
+  "last_treatment_including_antiEGFR",
+  "last_treatment_including_methotrexate"
+)]) 
+
+#Separate variables according to statistical test to make
+for_kruskal <- c(
+  "specimen_type",
+  "samptype",
+  "AssessmentDoneOn",
+  "SampleSize_bin",
+  "RNA_assay_vendor",
+  "RNA_assay_library",
+  "RNA_nucleic_acid_extraction",
+  "Sex",
+  "Consumption",
+  "HPV_status_temp",
+  "Prim_diagnosis",
+  "Metastatic_at_Rbiopsy",
+  "RM_type",
+  "surg_before_Rbiopsy",
+  "surg_multiple_before_Rbiopsy",
+  "RT_before_Rbiopsy",
+  "RT_multiple_before_Rbiopsy",
+  "Sample_irradiated",
+  "Platin_before_Rbiopsy",
+  "Taxanes_before_Rbiopsy",
+  "FU_before_Rbiopsy",
+  "AntiEGFR_before_Rbiopsy",
+  "Methotrexate_before_Rbiopsy",
+  "Gemcitabine_before_Rbiopsy",
+  "Other_ST_before_Rbiopsy",
+  "AntiPD1_before_Rbiopsy",
+  "AntiCTLA4_before_Rbiopsy",
+  "ICI_other_before_Rbiopsy",
+  "last_treatment_including_antiPD1",
+  "last_treatment_including_platin",
+  "last_treatment_including_FU",
+  "last_treatment_including_taxanes",
+  "last_treatment_including_antiEGFR",
+  "last_treatment_including_methotrexate"
+)#"AntiPD1_regimen_si",
+#"ST_timing_end_last_treatment_Rbiopsy_bin")
+for_lm <- c(
+  "Age_Rbiopsy",
+  "PRIM_diagnosis_grade_si",
+  "PRIM_diagnosis_stage_si",
+  "max_line_before_Rbiopsy_si"
+)
+
+relevant_covariates[, for_lm] <- apply(relevant_covariates[, for_lm], 2, 
+                                       function(x) as.numeric(as.factor(x)))
+```
+
+Extract features
+
+```{r output = FALSE}
+#Import transcriptomic features
+cytosig_scores <- as.data.frame(t(read.table("/home/daniel/IMMUCAN/cytosig_preds_full.Zscore", 
+                             header = TRUE, sep = "\t", check.names = FALSE)))
+colnames(cytosig_scores) <- paste(colnames(cytosig_scores), "_score", sep = "")
+cytosig_scores <- cytosig_scores[colnames(counts_HUGO_norm),]
+
+ica_metasamples <- read.csv("/home/daniel/IMMUCAN/Modules_RNAseq/ICA_full_metasamples_topvar_zscore_35_converged.csv",
+                            row.names = 1)
+ica_metagenes <- read.csv("/home/daniel/IMMUCAN/Modules_RNAseq/ICA_full_metagenes_topvar_zscore_35_converged.csv",
+                          row.names = 1, check.names = FALSE)
+
+load("/home/daniel/IMMUCAN/leiden_components2")
+leiden_components <- as.data.frame(t(leiden_components))
+colnames(leiden_components) <- paste("leiden_", 1:ncol(leiden_components), sep = "")
+
+load("/home/daniel/IMMUCAN/leiden_modules2")
+names(leiden_modules) <- colnames(leiden_components)
+
+
+#Or generate them
+library(progeny)
+PathwayActivity_counts <- as.data.frame(progeny(as.matrix(counts_HUGO_norm), scale=FALSE, 
+                                  organism="Human", top = 500))
+colnames(PathwayActivity_counts) <- paste(colnames(PathwayActivity_counts), "_score", sep = "")
+
+library(ConsensusTME)
+results_constme_vst <- t(consensusTMEAnalysis(as.matrix(counts_HUGO_norm), cancer = "HNSC", statMethod = "ssgsea"))
+
+library(tidyestimate)
+estimate_df <- cbind(rownames(counts_HUGO_norm), counts_HUGO_norm)
+estimate_sc <- estimate_score(estimate_df, is_affymetrix = FALSE)
+
+library(readxl)
+hn_cafs_sigs <- read_xlsx("/home/daniel/IMMUCAN/Metadata_ClinicalData/Obradovic_HN_CAF_sigs.xlsx", 
+                          sheet = 2, skip = 2)
+hn_cafs_sigs_comps <- sapply(unique(hn_cafs_sigs$cluster), function(x) gsva(ssgseaParam(as.matrix(counts_HUGO_norm), 
+                                                                              list(unlist(hn_cafs_sigs[hn_cafs_sigs$cluster == x & hn_cafs_sigs$p_val_adj < 1e-10, "gene"]))), 
+                                                               verbose = FALSE))
+colnames(hn_cafs_sigs_comps) <- paste("HN_CAF_sig", seq(0,4), sep = "_")
+rownames(hn_cafs_sigs_comps) <- colnames(counts_HUGO_norm)
+
+pan_caf_sigs <- read_xlsx("/home/daniel/IMMUCAN/Metadata_ClinicalData/Galbo_panCAF_sigs.xlsx", 
+                          sheet = 3, skip = 1)
+pan_cafs_sigs_comps <- apply(pan_caf_sigs, 2, function(x) gsva(ssgseaParam(as.matrix(counts_HUGO_norm), 
+                                                           list(x)),
+                                                           verbose = FALSE))
+rownames(pan_cafs_sigs_comps) <- colnames(counts_HUGO_norm)
+emt_sigs <- read_xlsx("/home/daniel/IMMUCAN/Metadata_ClinicalData/Jung_EMT.xlsx", 
+                          sheet = 1)
+emt_sigs_comps <- apply(emt_sigs, 2, function(x) gsva(ssgseaParam(as.matrix(counts_HUGO_norm), 
+                                                               list(x)),
+                                                               verbose = FALSE))
+
+full_features <- cbind(ica_metasamples, leiden_components, results_constme_vst,
+                       PathwayActivity_counts, cytosig_scores, hn_cafs_sigs_comps, 
+                       pan_cafs_sigs_comps, emt_sigs_comps)
+
+full_features <- as.data.frame(scale(full_features))
+```
+
+Random data imputation for missing clinical data
+
+```{r}
+relevant_covariates_imp_rand <- relevant_covariates 
+set.seed(1)
+rand_imputations <- lapply(relevant_covariates_imp_rand, rand_imput) 
+relevant_covariates_imp_rand <- as.data.frame(sapply(1:ncol(relevant_covariates), function(x)
+  ifelse(
+    is.na(relevant_covariates[, x]),
+    rand_imputations[[x]],
+    relevant_covariates[, x]
+  )))
+colnames(relevant_covariates_imp_rand) <- colnames(relevant_covariates)
+rownames(relevant_covariates_imp_rand) <- rownames(relevant_covariates)
+relevant_covariates_imp_rand[, for_lm] <- apply(relevant_covariates_imp_rand[, for_lm], 
+                                                2, function(x) as.numeric(as.factor(x)))
+
+relevant_covariates_notech <- relevant_covariates[, -grep("RNA|specimen|Assessment|SampleSize",
+                                                          colnames(relevant_covariates))]
+
+relevant_covariates_M_naive <- cbind(relevant_covariates_notech[, 1:9], clinical_data_rm[, "any_treatment_before_Rbiopsy", drop = FALSE])
+relevant_covariates_RM <- cbind(relevant_covariates_notech[, 1:9],
+                                "RM" = factor(relevant_covariates_notech$RM_type == "RM"))
+relevant_covariates_RM_refractory <- cbind(relevant_covariates_notech[, 1:9], 
+                                           clinical_data_rm[, "RM_refractory", drop = FALSE])
+```
+
+Multivariate statistical test to find clinical associations
+
+```{r}
+clin_diffs_unimod <- sapply(colnames(relevant_covariates_notech)[-10],
+                            function(x) p.adjust(sapply(colnames(full_features),
+                                               function(y) 
+                                                 extract_best_pvalue(x,
+                                                                     summary(lm(univariate_model(y, x, unimodal = TRUE), data = relevant_covariates_imp_rand)))), "BH"))
+
+clin_diffs_adj <- as.data.frame(t(clin_diffs_unimod))
+rownames(clin_diffs_adj) <- colnames(clin_diffs_unimod)
+colnames(clin_diffs_adj) <- rownames(clin_diffs_unimod)
+
+```
+
+```{r}
+interest_variable <- "HPV_status_temp"
+sig_diffs <- unlist(clin_diffs_adj[interest_variable, clin_diffs_adj[interest_variable,] < 0.05])
+print(paste("Number of significant features in univariate model: ",
+            length(sig_diffs), sep = ""))
+
+clin_diffs_models <- sapply(names(sig_diffs),
+                            function(x)
+                              extract_best_pvalue(interest_variable, 
+                                                  summary(lm(multivariate_model(x, clin_diffs_adj,  unimodal = TRUE), data = relevant_covariates_imp_rand))))
+print(paste("Number of significant features in multivariate model: ",
+            length(which(clin_diffs_models < 0.05)), sep = ""))
+```
+
+## HPV analyses
+
+HPV-associated features
+
+```{r}
+#Figure 2F) Transcriptomic differences between HPV-positive and negative
+#Create adjacency matrix for graph
+raw_adjc_matrix <- abs(cor(full_features[, names(clin_diffs_models[clin_diffs_models < 0.05])]))
+adjc_matrix <- raw_adjc_matrix
+#Binarize edges (absent/present) by thresholding correlation (> 0.6)
+adjc_matrix[adjc_matrix > 0.6] <- 1
+adjc_matrix[adjc_matrix < 0.6] <- 0
+#Remove autoedges
+diag(adjc_matrix) <- 0
+#Create graph
+g1 <- graph_from_adjacency_matrix(adjc_matrix, mode = "undirected", weighted = TRUE)
+#Assign the width to the edges based on the correlation
+E(g1)$weight <- raw_adjc_matrix[lower.tri(raw_adjc_matrix)][as.logical(adjc_matrix[lower.tri(adjc_matrix)])]*10-4
+#Adjust color limits
+clin_diffs_adj_color <- clin_diffs_models
+clin_diffs_adj_color[clin_diffs_adj_color < 1e-10] <- 1e-10
+clin_diffs_color <- clin_diffs_adj
+clin_diffs_color[clin_diffs_color < 1e-10] <- 1e-10
+#Change sign to p-values as a function of logFC
+clin_diffs_adj_color <- log10(unlist(clin_diffs_adj_color[clin_diffs_adj_color < 0.05]))
+xxx <- sapply(names(clin_diffs_adj_color),
+              function(x) mean(full_features[clinical_data_rm$HPV_status_temp == "Negative", x]) - mean(full_features[clinical_data_rm$HPV_status_temp == "Positive", x]))
+clin_diffs_adj_color[xxx < 0] <- -clin_diffs_adj_color[xxx < 0]
+#Multivariate color
+V(g1)$color <- colour_values(clin_diffs_adj_color, palette = "rdbu")
+
+#Do it with ggraph
+test1 <- as_tbl_graph(g1)
+feature_correlation <- raw_adjc_matrix[lower.tri(raw_adjc_matrix)][as.logical(adjc_matrix[lower.tri(adjc_matrix)])]
+log10_multivariate_pvalue <- clin_diffs_adj_color
+set.seed(1)
+test1 %>% ggraph(layout = 'fr') +
+  geom_edge_link(aes(alpha = feature_correlation)) + 
+  geom_node_point(aes(color = log10_multivariate_pvalue), size = 5) + 
+  scale_color_gradient2(midpoint=0, low="blue", high="red", mid= "white") +
+  coord_fixed() + 
+  theme_graph() + geom_node_text(aes(label = name), repel = TRUE) +
+  #theme_bw(base_size = 30, base_family = "Helvetica") +
+  theme(text = element_text(size = 18))
+```
+
+HPV figures
+
+```{r}
+#Figure 2G) CDKN2A (p16) expression vs leiden_27 to accurately classify HPV-positive tumors
+ggscatter(as.data.frame(cbind(t(counts_HUGO_norm), 
+                              full_features,
+                              "HPV status" = clinical_data_rm$HPV_status_temp)), 
+          "CDKN2A", "leiden_27", color = "HPV status", size= 1.5, palette = c("darkgray", "firebrick3")) +
+  xlab("CDKN2A expression") + ylab("Module leiden 27 score (meiotic genes)")  +
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+
+#Figure 2H) DNA repair module (HPV-neg vs pos and GO enriched terms)
+HPV_status <- clinical_data_rm$HPV_status_temp
+HPV_status[HPV_status == "Negative"] <- "HPV-negative"
+HPV_status[HPV_status == "Positive"] <- "HPV-positive"
+
+as.data.frame(cbind(full_features, "HPV_status" = HPV_status)) %>%
+  ggplot(aes(HPV_status, leiden_129)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Module leiden 129 score (DNA repair)") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4, size = 4.5)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+ego <- enrichGO(gene          = leiden_modules[["leiden_129"]],
+                OrgDb         = org.Hs.eg.db,
+                keyType = "SYMBOL",
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+dotplot(ego)
+
+#Figure 2I) lncRNAs from unsupervised modules higher in HPV-negative samples
+temp1 <- clinical_data_rm
+rownames(temp1) <- rownames(full_features)
+temp1[, "HPV status"] <- temp1$HPV_status_temp
+colors_hpv <- list("HPV status" = c("darkgray", "firebrick3"))
+names(colors_hpv[["HPV status"]]) <- unique(clinical_data_rm$HPV_status_temp)
+pheatmap::pheatmap(counts_HUGO_norm[c(leiden_modules$leiden_32, 
+                                      leiden_modules$leiden_99,
+                                      leiden_modules$leiden_28),
+                                    order(clinical_data_rm$HPV_status_temp)],
+                   cluster_rows = TRUE, cluster_cols = FALSE, treeheight_row = 0, clustering_method = "single",
+                   show_colnames = FALSE, annotation_colors = colors_hpv,
+                   annotation_col = temp1[order(clinical_data_rm$HPV_status_temp), "HPV status", drop = FALSE],
+                   color = colorRampPalette(c("white", "lightpink", "red"))(700),
+                   breaks = seq(5, 12, by = 0.01))
+
+
+as.data.frame(cbind(full_features, "LINC" = unlist(counts_HUGO_norm["LINC01980",]))) %>%
+  ggplot(aes(HPV_status, LINC)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "LINC01980 expression") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4, size = 4.5)
+```
+
+```{r}
+#Figure 2J) Differences between HPV-16 and other strains
+hpv_no16 <- data.frame("patient" = c("0439", "1238", "1247", "1665", "0847", "1174"),
+                       "strain" = c("HPV31", "HPV35", "HPV33", "HPV33", "HPV33", "HPV45"))
+hpv_strain <- clinical_data_rm$HPV_status_temp
+hpv_strain[clinical_data_rm$HPV_status_temp == "Positive"] <- "HPV16"
+hpv_strain[sapply(hpv_no16$patient, function(x) grep(x, rownames(clinical_data_rm)))] <- hpv_no16$strain
+
+hpv_simple <- factor(interaction(clinical_data_rm$HPV_status_temp, grepl("HPV16", hpv_strain)))
+levels(hpv_simple) <- c("HPV-negative", "Other_strains", "HPV16")
+
+full_features %>%
+  ggplot(aes(hpv_simple, ICA_16)) +
+  geom_boxplot(linewidth = 0.8) +
+  labs(x = "", y = "Module ICA_16 score (Cell cycle)") +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  theme(text = element_text(size = 18))
+
+full_features %>%
+  ggplot(aes(hpv_simple, IL13_score)) +
+  geom_boxplot(linewidth = 0.8) +
+  labs(x = "", y = "IL13 activity score") +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  theme(text = element_text(size = 18))
+```
+
+```{r}
+#Figures 2K-L) Differences in immune score between HPV-neg & pos, and taking only M naive patients
+full_features %>%
+  ggplot(aes(HPV_status, Immune_Score)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "RNA Immune score") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4, size = 4.5)
+
+full_features[clinical_data_rm$max_line_before_Rbiopsy_si == "-1",] %>%
+  ggplot(aes(HPV_status[clinical_data_rm$max_line_before_Rbiopsy_si == "-1"], Immune_Score)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "RNA Immune score") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4, size = 4.5)
+```
+
+## Consumption and primary location analyses
+
+```{r}
+#Figure S3D) Difference in RNA Immune score according to consumption
+Consumption <- clinical_data_rm$Consumption
+Consumption[Consumption == "Smoker_and_or_drinker"] <- "Smoker and/or drinker"
+Consumption[Consumption == "Non_smoker_non_drinker"] <- "Non smoker non drinker"
+full_features[!is.na(Consumption),]  %>%
+  ggplot(aes(Consumption[!is.na(Consumption)], Immune_Score)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "RNA Immune score") + 
+  theme(text = element_text(size = 18)) + 
+  theme(axis.text.x = element_text(angle = 30,hjust=1))
+```
+
+## Metastatic/locoregional analyses
+
+```{r}
+interest_variable <- "Metastatic_at_Rbiopsy"
+sig_diffs <- unlist(clin_diffs_adj[interest_variable, clin_diffs_adj[interest_variable,] < 0.05])
+print(paste("Number of significant features in univariate model: ",
+            length(sig_diffs), sep = ""))
+
+clin_diffs_models <- sapply(names(sig_diffs),
+                            function(x)
+                              extract_best_pvalue(interest_variable, 
+                                                  summary(lm(multivariate_model(x, clin_diffs_adj,  unimodal = TRUE), data = relevant_covariates_imp_rand))))
+print(paste("Number of significant features in multivariate model: ",
+            length(which(clin_diffs_models < 0.05)), sep = ""))
+
+```
+
+```{r}
+minmaxscaling <- function(x) {
+  return((x- min(x,na.rm = TRUE)) /(max(x, na.rm = TRUE)-min(x, na.rm = TRUE)))
+}
+
+full_features_minmax <- as.data.frame(t(apply(full_features[, names(clin_diffs_models)], 2, minmaxscaling)))
+univ_logfcs <- apply(full_features_minmax, 1, 
+                     function(x) mean(x[clinical_data_rm$Metastatic_at_Rbiopsy == "Yes"])-mean(x[clinical_data_rm$Metastatic_at_Rbiopsy == "No"]))
+change_sign <- factor(univ_logfcs < 0)
+levels(change_sign) <- c("Higher in distant metastases", "Higher in locoregional disease")
+finalq_values <- log10(clin_diffs_models)
+finalq_values[univ_logfcs < 0] <- -finalq_values[univ_logfcs < 0]
+changes_univs <- data.frame("log_q_values" = finalq_values[clin_diffs_models < 0.05], 
+                            "names" = names(clin_diffs_models[clin_diffs_models < 0.05]),
+                            "sign" = change_sign[clin_diffs_models < 0.05])
+library(forcats)
+#Figure 5C) Transcriptomic differences between locoregional and distant metastases
+changes_univs %>%
+  mutate(names = fct_reorder(names, log_q_values)) %>%
+  ggplot(aes(x=names, y = log_q_values, fill = sign)) +
+  geom_bar(stat = "identity") + 
+  coord_flip() + ylab("log10(q-value)") + xlab(NULL) +
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 12)) 
+```
+
+```{r}
+#Figure 5D-E) Correlations around EGFR activty score
+clinical_data_rm[, "Disease extent"] <- clinical_data_rm$Metastatic_at_Rbiopsy
+clinical_data_rm$`Disease extent`[clinical_data_rm$`Disease extent` == "No"] <- "Locoregional disease only"
+clinical_data_rm$`Disease extent`[clinical_data_rm$`Disease extent` == "Yes"] <- "Distant metastatic disease"
+clinical_data_rm %>% 
+  ggplot(aes(full_features$leiden_12, full_features$EGFR_score, color = `Disease extent`)) +
+  geom_point() + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) +
+  xlab("Module leiden 12 score (EGFR ligands)") + 
+  ylab("EGFR activity score") + 
+  stat_cor(method = "spearman", aes(label = paste(..r.label.., ..p.label.., sep = "~`, `~")), 
+           color = "black",
+           size = 4)
+
+clinical_data_rm %>% 
+  ggplot(aes(full_features$ICA_27, full_features$EGFR_score, color = `Disease extent`)) +
+  geom_point() + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) +
+  xlab("Module ICA 27 score (Cell adhesion/motility)") + 
+  ylab("EGFR activity score") + 
+  stat_cor(method = "spearman", aes(label = paste(..r.label.., ..p.label.., sep = "~`, `~")), 
+           color = "black",
+           size = 4)
+
+
+clinical_data_rm %>% 
+  ggplot(aes(unlist(counts_HUGO_norm["HBEGF",]), full_features$EGFR_score, color = `Disease extent`)) +
+  geom_point() + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) +
+  xlab("HBEGF expression") + 
+  ylab("EGFR activity score") + 
+  stat_cor(method = "spearman", aes(label = paste(..r.label.., ..p.label.., sep = "~`, `~")), 
+           color = "black",
+           size = 4)
+
+clinical_data_rm %>% 
+  ggplot(aes(unlist(counts_HUGO_norm["AREG",]), full_features$EGFR_score, color = `Disease extent`)) +
+  geom_point() + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) +
+  xlab("AREG expression") + 
+  ylab("EGFR activity score") + 
+  stat_cor(method = "spearman", aes(label = paste(..r.label.., ..p.label.., sep = "~`, `~")), 
+           color = "black",
+           size = 4)
+```
+
+```{r}
+#Figure 5F) Effect of different genes on EGFR pathway activity
+EGFR_expression <- unlist(counts_HUGO_norm["EGFR",])
+load("/home/daniel/IMMUCAN/cnv_genes_wide_good_cnvs_contv2")
+EGFR_copy_number <-  cnvs_genes_wide_good_genes[rownames(full_features), "EGFR"]
+HBEGF_expression <- unlist(counts_HUGO_norm["HBEGF",])
+AREG_expression <- unlist(counts_HUGO_norm["AREG",])
+EREG_expression <- unlist(counts_HUGO_norm["EREG",])
+model1 <- lm(EGFR_score ~ HBEGF_expression + AREG_expression + EREG_expression + EGFR_expression + EGFR_copy_number, data = full_features)
+plot_model(model1, vline.color = "red", show.values = TRUE) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18))
+```
+
+```{r}
+#Figure 5H) Effect of different genes on CXCL12 activity score
+snv_wes <- read.csv("/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_variants_20240805.csv",
+                        sep = ";", row.names = 1)
+snv_wes <- snv_wes[rownames(samples_data_rm),]
+HRAS_mutation <- snv_wes[rownames(full_features), "HRAS"]
+CXCL12_expression <- unlist(counts_HUGO_norm["CXCL12",])
+CXCR4_expression <- unlist(counts_HUGO_norm["CXCR4",])
+ACKR3_expression <- unlist(counts_HUGO_norm["ACKR3",])
+HRAS_expression <- unlist(counts_HUGO_norm["HRAS",])
+model1 <- lm(CXCL12_score ~ CXCL12_expression + ACKR3_expression + CXCR4_expression + 
+               HRAS_expression + HRAS_mutation,
+           data = full_features)
+plot_model(model1, vline.color = "red", show.values = TRUE) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  theme(text = element_text(size = 18))
+
+full_features %>%
+  ggplot(aes(reorder(snv_wes[rownames(full_features), "HRAS"], CXCL12_score), CXCL12_score)) + 
+  geom_boxplot(linewidth = 0.8) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  theme(text = element_text(size = 18)) + xlab("HRAS mutation status") + 
+  ylab("CXCL12 activity score") + 
+  stat_compare_means(label = "p", size = 5, label.x = 1.4)
+```
+
+## R/M treatment lines analyses
+
+```{r}
+#Figure 5C-D) Representative examples of systemic treatment lines effect on the transcriptome
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, TGFb_score)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "TGFb activity score") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, CXCL12_score)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "CXCL12 activity score") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, IFNG_score)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "IFNG activity score") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, Plasma_cells)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "Deconvoluted plasma cells") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+```
+
+```{r}
+#Figure S5C) Clustering of transcriptomic features affected by treatment lines
+corrected_full_features <- as.data.frame(sapply(colnames(full_features), 
+                                                function(x)
+                                                  lm(
+                                                    full_features[, x] ~ HPV_status_temp +
+                                                      Metastatic_at_Rbiopsy +
+                                                      Prim_diagnosis + Consumption + samptype +
+                                                      specimen_type + RNA_nucleic_acid_extraction +
+                                                      RNA_assay_library
+                                                    ,
+                                                    data = relevant_covariates_imp_rand
+                                                  )$residuals))
+
+diff_max_line <- p.adjust(apply(corrected_full_features, 2, function(x)
+  kruskal.test(x ~ clinical_data_rm$max_line_before_Rbiopsy_si)$p.value), "BH")
+
+long_data <- as.data.frame(
+  cbind(
+    corrected_full_features[, diff_max_line < 0.05],
+    "max_line" = clinical_data_rm$max_line_before_Rbiopsy_si
+  )
+) %>%
+  pivot_longer(cols = -max_line,
+               names_to = "feature",
+               values_to = "value") %>%
+  group_by(max_line, feature) %>%
+  summarize(mean_value = median(value, na.rm = TRUE), .groups = 'drop')
+
+max_line_df <- as.data.frame(pivot_wider(long_data, 
+                                         names_from = "max_line", 
+                                         values_from = "mean_value"))
+rownames(max_line_df) <- max_line_df$feature
+max_line_df$feature <- NULL
+
+pheatmap::pheatmap(
+  max_line_df,
+  cluster_cols = FALSE,
+  clustering_distance_rows = "euclidean",
+  color = colorRampPalette(c("white", "lightpink", "red"))(200),
+  breaks = seq(-1, 1, by = 0.01),
+  fontsize = 10,
+  cutree_rows = 3,
+  show_colnames = FALSE
+)
+```
+
+```{r}
+#Figure S4D) Examples of features increasing with treatment line and high in M naive patients
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, ICA_33)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "Module ICA 33 score") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+
+full_features  %>%
+  ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, ICA_26)) + 
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "Number of R/M treatment lines", y = "Module ICA 26 score") + 
+  theme(text = element_text(size = 18)) + 
+  scale_x_discrete(labels = c("-1" = "M naive", "3+" = ">3"))
+```
+
+## Transcriptomic subtypes
+
+```{r}
+#Keck et al centroids
+keck_subtypes <- as.data.frame(read_excel("/home/daniel/Things_StLouis/Downloads_StLouis/SCCHN/Keck_subtypes_centroids.xlsx"))
+colnames(keck_subtypes) <- keck_subtypes[1,]
+rownames(keck_subtypes) <- keck_subtypes[,1]
+keck_subtypes <- keck_subtypes[-1, -1]
+#We will update some HGNC symbols that are outdated
+corrected_HUGO_genes <- checkGeneSymbols(rownames(keck_subtypes))
+rownames(keck_subtypes) <- corrected_HUGO_genes$Suggested.Symbol
+
+#Our hypothesis is that the centroids from the subtypes are no longer representative of the 
+#R/M landscape
+#The subtyping is done with the methodology described in https://doi.org/10.1158/1078-0432.CCR-21-2244
+#Median-centered VST values are correlated (Pearson) to each of the subtypes
+#We assign the one with the highest correlation
+upstream_centered <- as.data.frame(t(apply(counts_HUGO_norm, 1, function(x) x - median(x))))
+upstream_centered <- upstream_centered[rownames(keck_subtypes),]
+keck_subtypes <- apply(keck_subtypes, 2, as.numeric)
+rownames(keck_subtypes) <- rownames(upstream_centered)
+keck_subtypes_cors <- apply(upstream_centered,
+                            2, function(x) max(cor(x, keck_subtypes, use = "complete.obs")))
+keck_subtypes_labels <- apply(upstream_centered, 2, function(x) which.max(cor(x, keck_subtypes, use = "complete.obs")))
+keck_subtypes_labels <- colnames(keck_subtypes)[keck_subtypes_labels]
+
+#Data frame for plotting
+keck_subtypes_labels_df <- data.frame(keck_subtypes_labels)
+colnames(keck_subtypes_labels_df) <- "Keck et al. subtypes"
+keck_subtypes_labels_df$`Keck et al. subtypes`[keck_subtypes_labels_df$`Keck et al. subtypes` == "BA"] <- "Basal"
+keck_subtypes_labels_df$`Keck et al. subtypes`[keck_subtypes_labels_df$`Keck et al. subtypes` == "CL"] <- "Classical"
+keck_subtypes_labels_df$`Keck et al. subtypes`[keck_subtypes_labels_df$`Keck et al. subtypes` == "IMS"] <- "Intermediate-mesenchymal"
+keck_subtypes_labels_df$`HPV status` <- clinical_data_rm$HPV_status_temp
+keck_subtypes_labels_df$`HPV status`[keck_subtypes_labels_df$`HPV status` == "Positive"] <- "HPV-positive"
+keck_subtypes_labels_df$`HPV status`[keck_subtypes_labels_df$`HPV status` == "Negative"] <- "HPV-negative"
+
+df_colors <- list(`Keck et al. subtypes` = brewer.pal(3,"Set2"),
+                  `HPV status` = c("gray", "firebrick3"))
+names(df_colors$`Keck et al. subtypes`) <- unique(keck_subtypes_labels_df$`Keck et al. subtypes`)
+names(df_colors$`HPV status`) <- unique(keck_subtypes_labels_df$`HPV status`)
+
+rownames(keck_subtypes_labels_df) <- rownames(full_features)
+breaksList <- seq(-2.5, 2.5, by = 0.01)
+#Figure 1C) General heatmap of all features with Keck et al transcriptomic subtypes
+pheatmap(full_features, clustering_method = "complete",
+         annotation_row =keck_subtypes_labels_df, 
+         show_rownames = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(length(breaksList)),
+         breaks = breaksList, show_colnames = FALSE,annotation_colors = df_colors 
+         )
+
+
+#Test the TCGA SCCHN samples
+tcga_hn_cbioport <- read.table("/home/daniel/Things_StLouis/Downloads_StLouis/SCCHN/SCCHN_TCGA_cbioportal_data_mrna_seq_v2_rsem.txt",
+                               header = TRUE, check.names = FALSE)
+tcga_hn_cbioport <- aggregate(. ~Hugo_Symbol,
+                              data = tcga_hn_cbioport, FUN =  sum)
+rownames(tcga_hn_cbioport) <- tcga_hn_cbioport$Hugo_Symbol
+tcga_hn_cbioport <- tcga_hn_cbioport[, -c(1,2)]
+colnames(tcga_hn_cbioport) <- sapply(colnames(tcga_hn_cbioport), function(x) gsub("-01", "", x))
+tcga_metadata <- read.table("/home/daniel/Things_StLouis/Downloads_StLouis/SCCHN/SCCHN_TCGA_cbioportal_data_clinical_patient.txt",
+                            sep = "\t",
+                            header = TRUE, row.names = 2)
+tcga_metadata <- tcga_metadata[colnames(tcga_hn_cbioport),]
+#tcga_hn_cbioport <- tcga_hn_cbioport[, which(tcga_metadata$HPV_STATUS_ISH == "Positive")]
+tcga_hn_cbioport_norm <- as.data.frame(vst(as.matrix(round(tcga_hn_cbioport))))
+tcga_hn_cbioport_centered <- as.data.frame(t(apply(tcga_hn_cbioport_norm, 1, function(x) x - median(x))))
+tcga_hn_cbioport_centered <- tcga_hn_cbioport_centered[rownames(keck_subtypes),]
+tcga_hn_subtypes_cors <- apply(tcga_hn_cbioport_centered,
+                            2, function(x) max(cor(x, keck_subtypes, use = "complete.obs")))
+
+subtype_cors_df <- data.frame("best_correlation_to_centroid" = c(keck_subtypes_cors, 
+                                              tcga_hn_subtypes_cors),
+           "dataset" = c(rep("IMMUCAN_RM", length(keck_subtypes_cors)),
+                         rep("TCGA", length(tcga_hn_subtypes_cors))))
+
+#Figure S1D) Centroid correlation in our cohort and TCGA
+subtype_cors_df %>%
+  ggplot(aes(x=dataset, y =best_correlation_to_centroid)) +
+  geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "Best correlation to a centroid") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4, size = 4.5, label.y = 0.7)
+```
+
+## Variability study
+
+```{r}
+#Figure S1C) Clinical variables with more effect on the transcriptome
+df_unimod <- as.data.frame(cbind(clin_diffs_unimod[, c(
+  "Consumption",
+  "PRIM_diagnosis_grade_si",
+  "PRIM_diagnosis_stage_si",
+  "Prim_diagnosis",
+  "HPV_status_temp",
+  "max_line_before_Rbiopsy_si",
+  "Metastatic_at_Rbiopsy"
+)], "modality" = "RNA_seq"))
+colnames(df_unimod) <- c(
+  c(
+    "Alcohol and/or tobacco consumption",
+    "Primary diagnosis grade",
+    "Primary diagnosis stage",
+    "Anatomical diagnosis location",
+    "HPV status",
+    "N° prior systemic treatment lines",
+    "Disease extent"
+  ),
+  "modality"
+) 
+df_unimod <- df_unimod %>% 
+  pivot_longer(!modality, names_to = "clinical_variable", values_to = "q_value") 
+df_unimod[,"q_value"] <- as.numeric(df_unimod$q_value)
+
+df_normalized <- df_unimod %>%
+              filter(q_value < 0.1) %>%
+              group_by(modality, clinical_variable) %>%
+              summarise(count = n())
+
+df_normalized %>%
+  ggplot(aes(x = reorder(clinical_variable, count), y = count)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(x = "", y = "Significant associations") +
+  theme_minimal() + 
+  coord_flip() +
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+
+```
+
+## IF - RNAseq analyses
+
+```{r}
+#Figure S1I) Relation between RNA-IF concordance and immune cell abundance
+if3_data <- read.csv("/home/daniel/IMMUCAN/H&N/IF_tables/FinalTables/IF3_cellsproportions_all_samples_20240710.csv",
+                     sep = ";", row.names = 1, dec = ",")
+if2_data <- read.csv("/home/daniel/IMMUCAN/H&N/IF_tables/FinalTables/IF2_tumor_scores_all_samples_20240710.csv",
+                     sep = ";", row.names = 1, dec = ",")
+if1_data <- read.csv("/home/daniel/IMMUCAN/H&N/IF_tables/FinalTables/IF1_cell_proportions_all_samples_20210710.csv",
+                     sep = ";", row.names = 1, dec = ",")
+pairs_if <- data.frame(c("CD8_totalR", "T_cells_CD8"),
+                       c("CD4_totalR", "T_cells_CD4"),
+                       c("Treg_totalR", "T_regulatory_cells"),
+                       c("NK_totalR", "NK_cells"),
+                       c("MacCD163_total_p", "Macrophages"),
+                       c("DC_total_p", "Dendritic_cells"),
+                       c("B_total_p", "B_cells"),
+                       c("Neutrophil_total_p", "Neutrophils"))
+ifs_cors_df <- apply(pairs_if[, 1:4], 2, function(x)
+  c(
+    cor(if3_data[rownames(full_features), x[1]], full_features[, x[2]], use = "complete.obs", method = "spearman"),
+    var(if3_data[, x[1]]),
+    mean(if3_data[, x[1]])
+  ))
+
+ifs_cors_df <- cbind(ifs_cors_df, apply(pairs_if[, 5:8], 2, function(x)
+  c(
+    cor(if1_data[rownames(full_features), x[1]], full_features[, x[2]], use = "complete.obs", method = "spearman"),
+    var(if1_data[, x[1]]),
+    mean(if1_data[, x[1]])
+  )))
+colnames(ifs_cors_df) <- pairs_if[2,]
+rownames(ifs_cors_df) <- c("Correlation", "Variance", "Mean_abundance")
+ifs_cors_df <- as.data.frame(t(ifs_cors_df))
+ifs_cors_df$Cell_type <- rownames(ifs_cors_df)
+library(ggrepel)
+ifs_cors_df %>% 
+  ggplot(aes(Mean_abundance, Correlation, label = Cell_type)) + geom_point() + 
+  geom_text_repel(size=5) + scale_x_log10() + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18))  + 
+  xlab("Mean IF proportion (log10)") + ylab("Correlation IF-RNAseq")
+```
+
+```{r}
+#Figures S1J-K) Examples of IF-RNA correlation: T cells and DCs
+full_features %>% 
+  ggplot(aes(if3_data[rownames(full_features), "CD8_totalR"], T_cells_CD8)) +
+  geom_point() + scale_x_log10() + xlab("CD8+ T cells - IF (log10)") + 
+  ylab("CD8+ T cells - RNAseq") + theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+full_features %>% 
+  ggplot(aes(if1_data[rownames(full_features), "DC_total_p"], Dendritic_cells)) +
+  geom_point() + scale_x_log10() + xlab("Dendritic cells - IF (log10)") + 
+  ylab("Dendritic cells - RNAseq") + theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+```
+
+```{r}
+#Figure S3E) Correlation in IF-RNA for cell cycle features
+full_features %>% 
+  ggplot(aes(leiden_119, if2_data[rownames(full_features), "TumorCells_Ki67_ptotalTumorCells_total"])) +
+  geom_point() + scale_y_log10() + xlab("Module leiden 119 score (cell cycle)") + 
+  ylab("IF tumor cells Ki67+ (%)") + theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+```
+
+## WES - RNAseq analyses
+
+```{r}
+#Figure S1L) upper half - Relation of RNA Immune score to main genomic parameters
+molecular_scores <- read.csv("/home/daniel/IMMUCAN/H&N/molecular_scores_cnv.csv",
+                             sep = ";", row.names = 3, dec = ",")
+as.data.frame(cbind(full_features, 
+                    molecular_scores[rownames(samples_data_rm),])) %>% 
+  ggplot(aes(tmb, Immune_Score)) +
+  geom_point() + stat_cor(size = 5, label.x = 20, method = "spearman") + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) + ylab("RNA Immune score") +
+  xlab("TMB (mutations/Mb)")
+
+as.data.frame(cbind(full_features, 
+                    molecular_scores[rownames(samples_data_rm),]))  %>%
+  ggplot(aes(reorder(TMB_level, Immune_Score), Immune_Score)) + geom_boxplot(linewidth = 0.8) +
+  theme_bw(base_size = 30, base_family = "Helvetica") +
+  labs(x = "", y = "RNA Immune score") + 
+  theme(text = element_text(size = 18)) + 
+  stat_compare_means(label= "p", label.x = 1.4) 
+
+as.data.frame(cbind(full_features, 
+                    molecular_scores[rownames(samples_data_rm),]))[samples_data_rm$specimen_type == "Fresh Frozen tissue",] %>% 
+  ggplot(aes(ploidy, Immune_Score)) +
+  geom_point() + stat_cor(size = 5, label.x = 3.5, method = "spearman") + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) + ylab("RNA Immune score") +
+  xlab("Ploidy")
+
+as.data.frame(cbind(full_features, 
+                    molecular_scores[rownames(samples_data_rm),]))[samples_data_rm$specimen_type == "Fresh Frozen tissue",] %>% 
+  ggplot(aes(CNA_altered, Immune_Score)) +
+  geom_point() + stat_cor(size = 5, label.x = 0.6, method = "spearman") + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) + ylab("RNA Immune score") +
+  xlab("Fraction genome altered")
+```
+
+### Chr11q13.3 WES - RNAseq analyses
+
+```{r}
+#Import continuous CNV data
+load("/home/daniel/IMMUCAN/cnv_genes_wide_good_cnvs_contv2")
+
+#Gene to chr band correspondance
+genes_chr_bands <- read.table("/home/daniel/HumanGenomes/Annotations/Chr_band_gene_mart.txt",
+                              sep = "\t", header = TRUE)
+genes_chr_bands$final_band <- apply(genes_chr_bands, 1, function(x) paste(x[3], x[1], sep = ""))
+colnames(genes_chr_bands)[colnames(genes_chr_bands) == "HGNC.symbol"] <- "gene"
+genes_chr_bands <- genes_chr_bands[sapply(genes_chr_bands$final_band, function(x) grepl("p|q", x)),]
+genes_chr_bands <- genes_chr_bands[!duplicated(genes_chr_bands),]
+
+#Transform df to long
+mofa_wes <- as.data.frame(t(cnvs_genes_wide_good_genes[rownames(full_features),]))
+mofa_wes$gene <- rownames(mofa_wes)
+mofa_wes_long <- mofa_wes %>% pivot_longer(!gene, names_to = "sample", values_to = "cnv")
+mofa_wes_long <- merge(mofa_wes_long, genes_chr_bands[, c("gene", "final_band")],
+                       by = "gene", all.x = TRUE)
+
+#Merge genes by chr band by taking mean cnv of all genes per band
+mofa_wes_long <- mofa_wes_long %>%
+  group_by(sample, final_band) %>%
+  summarise(mean_cnv = mean(cnv))
+
+#Transform df to wide
+mofa_wes_wide <- as.data.frame(pivot_wider(mofa_wes_long, names_from = final_band, values_from = mean_cnv))
+rownames(mofa_wes_wide) <- mofa_wes_wide$sample
+mofa_wes_wide$sample <- NULL
+
+#Figure 4A) Correlation between transcriptomic and genomic chr11q13.3
+mofa_wes_wide[rownames(full_features),] %>% 
+  ggplot(aes(`11q13.3`, full_features$leiden_60)) + 
+  geom_point() + scale_x_log10() + theme_classic() +
+  stat_cor(size = 5, method = "spearman") + xlab("Copy number chr11q13.3") + ylab("Module leiden 60 score") +
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18))
+```
+
+```{r}
+#Figure 4B) Genomic - transcriptomic correlation of individual genes 
+#Import gene lengths
+gene_lengths <- read.table("/home/daniel/HumanGenomes/Annotations/genelengths_fromGencodeGTFv29.tsv",
+                           sep = "\t")
+gene_lengths <- as.data.frame(t(apply(gene_lengths, 1, function(x) strsplit(x, " ")[[1]][c(1,2,8)])))
+colnames(gene_lengths) <- c("Start", "End", "GeneName")
+gene_lengths$GeneName <- sapply(gene_lengths$GeneName, function(x) gsub(";", "", x))
+gene_lengths$Length <- apply(gene_lengths, 1, function(x) abs(as.numeric(x[2]) - as.numeric(x[1])))
+
+genes_to_study <- c("CCND1", "LTO1", "FGF19", "FGF4", "FGF3",
+                    "ANO1", "FADD", "MIR548K", "PPFIA1", "CTTN")
+cor_regions <- sapply(genes_to_study,
+                      function(x) cor(mofa_wes_wide[rownames(full_features), "11q13.3"],
+                                      unlist(counts_HUGO_norm[x,])))
+genes_df <- data.frame("gene" = genes_to_study,
+                       "start" = as.numeric(sapply(genes_to_study,
+                                        function(x) gene_lengths[gene_lengths$GeneName == x, "Start"])),
+                       "end" = as.numeric(sapply(genes_to_study,
+                                        function(x) gene_lengths[gene_lengths$GeneName == x, "End"])),
+                       "correlation" = cor_regions)
+genes_df$id <- seq_len(nrow(genes_df))
+ggplot(genes_df, aes(xmin = start, xmax = end, ymin = id - 0.4, ymax = id + 0.4, fill = correlation)) +
+  geom_rect(color = "black") +  # Add rectangles + 
+  geom_text(aes(x = end + 3000, y = id, label = gene), hjust = 0) + 
+  scale_fill_gradient(low = "blue", high = "red") +  # Set color gradient
+  theme_minimal(base_size = 15) +  # Set theme
+  labs(x = "Chromosome 11 position", y = "", fill = "Genomic-transcriptomic correlation") +  # Add labels
+  theme(axis.text.y = element_blank(),  # Remove y-axis text
+        axis.ticks.y = element_blank())  # Remove y-axis ticks
+```
+
+```{r}
+#Figure 4C) Genomic - transcriptomic correlation of FGF19
+as.data.frame(t(counts_HUGO_norm)) %>% 
+  ggplot(aes(cnvs_genes_wide_good_genes[rownames(full_features), "FGF19"], FGF19)) +
+  geom_point() + scale_x_log10() +# geom_xsidedensity() + geom_ysidedensity() +
+  xlab("FGF19 gene copy number") + ylab("FGF19 gene expression") +
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) 
+```
+
+```{r}
+#Figure 4D) Separate genomic & transcriptomic correlation of individual genes
+pheatmap::pheatmap(cor(t(counts_HUGO_norm[genes_to_study[-c(6,7)],])),
+                   cluster_rows = FALSE, cluster_cols = FALSE,
+                   color = colorRampPalette(c("white", "lightpink", "red"))(100),
+                   breaks = seq(0, 1, by = 0.01))
+
+pheatmap::pheatmap(cor(log10(cnvs_genes_wide_good_genes[,genes_to_study[-c(6,7)]] + 0.1)),
+                   cluster_rows = FALSE, cluster_cols = FALSE,
+                   color = colorRampPalette(c("white", "lightpink", "red"))(100),
+                   breaks = seq(0, 1, by = 0.01))
+```
+
+```{r}
+#Figure 4E) Correlation of FGF with receptors
+corrplot::corrplot(cor(t(counts_HUGO_norm[c("FGFR1", "FGFR2", "FGFR3", "FGFR4",
+                                            "FGF3", "FGF4", "FGF19"),])), 
+                   order =  "hclust", tl.col = "black")
+```
+
+```{r}
+#Figure 4F) Logistic regression model of clinical variables affecting chr11q13 amplification
+leiden_60_binarized <- as.numeric(as.factor(full_features$leiden_60 > 0.2)) - 1
+library(ggstats)
+data_leiden_60_model <- relevant_covariates_imp_rand[, c("HPV_status_temp", "Consumption",
+                                                         "Prim_diagnosis", "Metastatic_at_Rbiopsy")]
+colnames(data_leiden_60_model) <- c("HPV status", "Substance abuse", 
+                                    "Anatomical diagnosis location", "Disease extent")
+data_leiden_60_model <- as.data.frame(lapply(data_leiden_60_model, factor), check.names = FALSE)
+levels(data_leiden_60_model$`HPV status`) <- c("HPV-negative", "HPV-positive")
+levels(data_leiden_60_model$`Substance abuse`) <- c("Non smoker non drinker", "Smoker and/or drinker")
+levels(data_leiden_60_model$`Anatomical diagnosis location`) <- c("Hypopharynx", "Larynx",
+                                                                  "Oral cavity", "Oropharnyx")
+levels(data_leiden_60_model$`Disease extent`) <- c("Locoregional disease only", 
+                                                   "Distant metastatic disease")
+
+model1 <- glm(leiden_60_binarized ~ `HPV status` +
+                `Substance abuse` + `Anatomical diagnosis location` + 
+                `Disease extent`, 
+              data = data_leiden_60_model, family = "binomial")
+ggcoef_model(model1) + theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 10)) #Size 18 for PDF figure
+```
+
+```{r}
+#Figure 4G) Effect of max_line in FGF expression
+clinical_data_rm$max_line_before_Rbiopsy_si2 <- clinical_data_rm$max_line_before_Rbiopsy_si
+clinical_data_rm$max_line_before_Rbiopsy_si2[clinical_data_rm$max_line_before_Rbiopsy == 4] <- "4"
+clinical_data_rm$max_line_before_Rbiopsy_si2[clinical_data_rm$max_line_before_Rbiopsy %in% c(5,6,7)] <- "5+"
+HPV_status <- clinical_data_rm$HPV_status_temp
+HPV_status[HPV_status == "Negative"] <- "HPV-negative"
+HPV_status[HPV_status == "Positive"] <- "HPV-positive"
+
+clinical_data_rm %>% 
+  ggplot(aes(max_line_before_Rbiopsy_si2, unlist(counts_HUGO_norm["FGF19",]),
+             color = HPV_status)) +
+  geom_boxplot(linewidth = 0.8) + 
+  theme_bw(base_size = 30, base_family = "Helvetica") + 
+  theme(text = element_text(size = 18)) +
+  xlab("Number of R/M treatment lines") + ylab("FGF19 gene expression") +
+  scale_color_manual(values = c("gray41", "firebrick3")) +
+  guides(color = guide_legend(title = "HPV status"))
+```
