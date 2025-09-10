@@ -328,22 +328,6 @@ clinical_data_rm_if2 <- clinical_data_rm_if2[order(rownames(clinical_data_rm_if2
 
 if2_data <- if2_data[rownames(samples_data_rm_if2), ]
 
-imc_data <- read.csv(
-  "/home/daniel/IMMUCAN/H&N/IMC_density_article1.csv",
-  sep = ";",
-  row.names = 2,
-  dec = ","
-)
-samples_imc <- samples_data_raw[rownames(samples_data_raw) %in% rownames(imc_data) &
-                                  samples_data_raw$SAMP_timepoint %in% c("Registration", "UPSTREAM_Post_treatment"), ]
-clinical_data_rm_imc <- clinical_data_raw[rownames(clinical_data_raw) %in% gsub("-F.*", "", rownames(samples_imc)), ]
-clinical_data_rm_imc <- clinical_data_rm_imc[clinical_data_rm_imc$Article_I == "Yes" , ]
-samples_data_rm_imc <- samples_imc[samples_imc$patient %in% rownames(clinical_data_rm_imc), ]
-samples_data_rm_imc <- samples_data_rm_imc[order(samples_data_rm_imc$patient), ]
-clinical_data_rm_imc <- clinical_data_rm_imc[order(rownames(clinical_data_rm_imc)), ]
-
-imc_data <- imc_data[rownames(samples_data_rm_imc), ]
-
 
 #CD8 phenotypes
 CD8_cats <- read.csv("/home/daniel/IMMUCAN/H&N/ImmuneType_CD8_IF3_g.csv",
@@ -449,20 +433,13 @@ test_cox_CD8 <- summary(
     data = clinical_data_rm_if3
   )
 )$coefficients[2, c(1, 5)]
-test_cox_imc <- compute_cox(imc_data[, c(
-  "Tumor.B2M..1",
-  "Tumor.CarbonicAnhydrase..1",
-  "Tumor.cleavedPARP..1",
-  "Tumor.Ecad..1",
-  "Tumor.Ki67..1"
-)], clinical_data_rm_imc)
+
 full_cox <- cbind(
   test_cox_rna,
   test_cox_if1,
   test_cox_if2,
   test_cox_if3,
   test_cox_wes,
-  test_cox_imc,
   "CD8_infiltrated" = test_cox_CD8
 )
 final_cox <- p.adjust(full_cox[2, ], "BH")
