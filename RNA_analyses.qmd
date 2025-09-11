@@ -391,7 +391,7 @@ print(paste("Number of significant features in multivariate model: ",
 HPV-associated features
 
 ```{r}
-#Figure 2F) Transcriptomic differences between HPV-positive and negative
+#Figure 1F) Transcriptomic differences between HPV-positive and negative
 #Create adjacency matrix for graph
 raw_adjc_matrix <- abs(cor(full_features[, names(clin_diffs_models[clin_diffs_models < 0.05])]))
 adjc_matrix <- raw_adjc_matrix
@@ -435,7 +435,7 @@ test1 %>% ggraph(layout = 'fr') +
 HPV figures
 
 ```{r}
-#Figure 2G) CDKN2A (p16) expression vs leiden_27 to accurately classify HPV-positive tumors
+#Figure 1G) CDKN2A (p16) expression vs leiden_27 to accurately classify HPV-positive tumors
 ggscatter(as.data.frame(cbind(t(counts_HUGO_norm), 
                               full_features,
                               "HPV status" = clinical_data_rm$HPV_status_temp)), 
@@ -444,7 +444,7 @@ ggscatter(as.data.frame(cbind(t(counts_HUGO_norm),
   theme_bw(base_size = 30, base_family = "Helvetica") + 
   theme(text = element_text(size = 18)) 
 
-#Figure 2H) DNA repair module (HPV-neg vs pos and GO enriched terms)
+#Figure 1H) DNA repair module (HPV-neg vs pos and GO enriched terms)
 HPV_status <- clinical_data_rm$HPV_status_temp
 HPV_status[HPV_status == "Negative"] <- "HPV-negative"
 HPV_status[HPV_status == "Positive"] <- "HPV-positive"
@@ -468,7 +468,7 @@ ego <- enrichGO(gene          = leiden_modules[["leiden_129"]],
                 readable      = TRUE)
 dotplot(ego)
 
-#Figure 2I) lncRNAs from unsupervised modules higher in HPV-negative samples
+#Figure 1I) lncRNAs from unsupervised modules higher in HPV-negative samples
 temp1 <- clinical_data_rm
 rownames(temp1) <- rownames(full_features)
 temp1[, "HPV status"] <- temp1$HPV_status_temp
@@ -495,33 +495,7 @@ as.data.frame(cbind(full_features, "LINC" = unlist(counts_HUGO_norm["LINC01980",
 ```
 
 ```{r}
-#Figure 2J) Differences between HPV-16 and other strains
-hpv_no16 <- data.frame("patient" = c("0439", "1238", "1247", "1665", "0847", "1174"),
-                       "strain" = c("HPV31", "HPV35", "HPV33", "HPV33", "HPV33", "HPV45"))
-hpv_strain <- clinical_data_rm$HPV_status_temp
-hpv_strain[clinical_data_rm$HPV_status_temp == "Positive"] <- "HPV16"
-hpv_strain[sapply(hpv_no16$patient, function(x) grep(x, rownames(clinical_data_rm)))] <- hpv_no16$strain
-
-hpv_simple <- factor(interaction(clinical_data_rm$HPV_status_temp, grepl("HPV16", hpv_strain)))
-levels(hpv_simple) <- c("HPV-negative", "Other_strains", "HPV16")
-
-full_features %>%
-  ggplot(aes(hpv_simple, ICA_16)) +
-  geom_boxplot(linewidth = 0.8) +
-  labs(x = "", y = "Module ICA_16 score (Cell cycle)") +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  theme(text = element_text(size = 18))
-
-full_features %>%
-  ggplot(aes(hpv_simple, IL13_score)) +
-  geom_boxplot(linewidth = 0.8) +
-  labs(x = "", y = "IL13 activity score") +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  theme(text = element_text(size = 18))
-```
-
-```{r}
-#Figures 2K-L) Differences in immune score between HPV-neg & pos, and taking only M naive patients
+#Figures 1J-K) Differences in immune score between HPV-neg & pos, and taking only M naive patients
 full_features %>%
   ggplot(aes(HPV_status, Immune_Score)) + 
   geom_boxplot(linewidth = 0.8) +
@@ -539,19 +513,15 @@ full_features[clinical_data_rm$max_line_before_Rbiopsy_si == "-1",] %>%
   stat_compare_means(label= "p", label.x = 1.4, size = 4.5)
 ```
 
-## Consumption and primary location analyses
-
 ```{r}
-#Figure S3D) Difference in RNA Immune score according to consumption
-Consumption <- clinical_data_rm$Consumption
-Consumption[Consumption == "Smoker_and_or_drinker"] <- "Smoker and/or drinker"
-Consumption[Consumption == "Non_smoker_non_drinker"] <- "Non smoker non drinker"
-full_features[!is.na(Consumption),]  %>%
-  ggplot(aes(Consumption[!is.na(Consumption)], Immune_Score)) + geom_boxplot(linewidth = 0.8) +
+#Figures S2D) Differences in immune score between HPV-neg and non-smoker non-drinker HPV-pos
+full_features[,!(clinical_data_rm$HPV_status_temp == "Positive" & 
+                clinical_data_rm$Consumption == "Smoker_and_or_drinker")] %>%
+  ggplot(aes(HPV_status, Immune_Score)) + 
+  geom_boxplot(linewidth = 0.8) +
   theme_bw(base_size = 30, base_family = "Helvetica") +
   labs(x = "", y = "RNA Immune score") + 
-  theme(text = element_text(size = 18)) + 
-  theme(axis.text.x = element_text(angle = 30,hjust=1))
+  theme(text = element_text(size = 18)) 
 ```
 
 ## Metastatic/locoregional analyses
@@ -587,7 +557,7 @@ changes_univs <- data.frame("log_q_values" = finalq_values[clin_diffs_models < 0
                             "names" = names(clin_diffs_models[clin_diffs_models < 0.05]),
                             "sign" = change_sign[clin_diffs_models < 0.05])
 library(forcats)
-#Figure 5C) Transcriptomic differences between locoregional and distant metastases
+#Figure 2C) Transcriptomic differences between locoregional and distant metastases
 changes_univs %>%
   mutate(names = fct_reorder(names, log_q_values)) %>%
   ggplot(aes(x=names, y = log_q_values, fill = sign)) +
@@ -598,7 +568,7 @@ changes_univs %>%
 ```
 
 ```{r}
-#Figure 5D-E) Correlations around EGFR activty score
+#Figure 2D-E) Correlations around EGFR activty score
 clinical_data_rm[, "Disease extent"] <- clinical_data_rm$Metastatic_at_Rbiopsy
 clinical_data_rm$`Disease extent`[clinical_data_rm$`Disease extent` == "No"] <- "Locoregional disease only"
 clinical_data_rm$`Disease extent`[clinical_data_rm$`Disease extent` == "Yes"] <- "Distant metastatic disease"
@@ -649,7 +619,7 @@ clinical_data_rm %>%
 ```
 
 ```{r}
-#Figure 5F) Effect of different genes on EGFR pathway activity
+#Figure 2F) Effect of different genes on EGFR pathway activity
 EGFR_expression <- unlist(counts_HUGO_norm["EGFR",])
 load("/home/daniel/IMMUCAN/cnv_genes_wide_good_cnvs_contv2")
 EGFR_copy_number <-  cnvs_genes_wide_good_genes[rownames(full_features), "EGFR"]
@@ -663,7 +633,7 @@ plot_model(model1, vline.color = "red", show.values = TRUE) +
 ```
 
 ```{r}
-#Figure 5H) Effect of different genes on CXCL12 activity score
+#Figure 2H) Effect of different genes on CXCL12 activity score
 snv_wes <- read.csv("/home/daniel/IMMUCAN/H&N/WES_tables/FinalFilesv2/HN_variants_20240805.csv",
                         sep = ";", row.names = 1)
 snv_wes <- snv_wes[rownames(samples_data_rm),]
@@ -691,7 +661,7 @@ full_features %>%
 ## R/M treatment lines analyses
 
 ```{r}
-#Figure 5C-D) Representative examples of systemic treatment lines effect on the transcriptome
+#Figure 3C-D) Representative examples of systemic treatment lines effect on the transcriptome
 full_features  %>%
   ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, TGFb_score)) + 
   geom_boxplot(linewidth = 0.8) +
@@ -726,7 +696,7 @@ full_features  %>%
 ```
 
 ```{r}
-#Figure S5C) Clustering of transcriptomic features affected by treatment lines
+#Figure S7C) Clustering of transcriptomic features affected by treatment lines
 corrected_full_features <- as.data.frame(sapply(colnames(full_features), 
                                                 function(x)
                                                   lm(
@@ -773,7 +743,7 @@ pheatmap::pheatmap(
 ```
 
 ```{r}
-#Figure S4D) Examples of features increasing with treatment line and high in M naive patients
+#Figure S7D) Examples of features increasing with treatment line and high in M naive patients
 full_features  %>%
   ggplot(aes(clinical_data_rm$max_line_before_Rbiopsy_si, ICA_33)) + 
   geom_boxplot(linewidth = 0.8) +
@@ -834,7 +804,7 @@ names(df_colors$`HPV status`) <- unique(keck_subtypes_labels_df$`HPV status`)
 
 rownames(keck_subtypes_labels_df) <- rownames(full_features)
 breaksList <- seq(-2.5, 2.5, by = 0.01)
-#Figure 1C) General heatmap of all features with Keck et al transcriptomic subtypes
+#Figure S2C) General heatmap of all features with Keck et al transcriptomic subtypes
 pheatmap(full_features, clustering_method = "complete",
          annotation_row =keck_subtypes_labels_df, 
          show_rownames = FALSE,
@@ -867,7 +837,7 @@ subtype_cors_df <- data.frame("best_correlation_to_centroid" = c(keck_subtypes_c
            "dataset" = c(rep("IMMUCAN_RM", length(keck_subtypes_cors)),
                          rep("TCGA", length(tcga_hn_subtypes_cors))))
 
-#Figure S1D) Centroid correlation in our cohort and TCGA
+#Figure S3D) Centroid correlation in our cohort and TCGA
 subtype_cors_df %>%
   ggplot(aes(x=dataset, y =best_correlation_to_centroid)) +
   geom_boxplot(linewidth = 0.8) +
@@ -880,7 +850,7 @@ subtype_cors_df %>%
 ## Variability study
 
 ```{r}
-#Figure S1C) Clinical variables with more effect on the transcriptome
+#Figure S3C) Clinical variables with more effect on the transcriptome
 df_unimod <- as.data.frame(cbind(clin_diffs_unimod[, c(
   "Consumption",
   "PRIM_diagnosis_grade_si",
@@ -925,7 +895,7 @@ df_normalized %>%
 ## IF - RNAseq analyses
 
 ```{r}
-#Figure S1I) Relation between RNA-IF concordance and immune cell abundance
+#Figure S3I) Relation between RNA-IF concordance and immune cell abundance
 if3_data <- read.csv("/home/daniel/IMMUCAN/H&N/IF_tables/FinalTables/IF3_cellsproportions_all_samples_20240710.csv",
                      sep = ";", row.names = 1, dec = ",")
 if2_data <- read.csv("/home/daniel/IMMUCAN/H&N/IF_tables/FinalTables/IF2_tumor_scores_all_samples_20240710.csv",
@@ -967,7 +937,7 @@ ifs_cors_df %>%
 ```
 
 ```{r}
-#Figures S1J-K) Examples of IF-RNA correlation: T cells and DCs
+#Figures S3J-K) Examples of IF-RNA correlation: T cells and DCs
 full_features %>% 
   ggplot(aes(if3_data[rownames(full_features), "CD8_totalR"], T_cells_CD8)) +
   geom_point() + scale_x_log10() + xlab("CD8+ T cells - IF (log10)") + 
@@ -980,19 +950,10 @@ full_features %>%
   theme(text = element_text(size = 18)) 
 ```
 
-```{r}
-#Figure S3E) Correlation in IF-RNA for cell cycle features
-full_features %>% 
-  ggplot(aes(leiden_119, if2_data[rownames(full_features), "TumorCells_Ki67_ptotalTumorCells_total"])) +
-  geom_point() + scale_y_log10() + xlab("Module leiden 119 score (cell cycle)") + 
-  ylab("IF tumor cells Ki67+ (%)") + theme_bw(base_size = 30, base_family = "Helvetica") + 
-  theme(text = element_text(size = 18)) 
-```
-
 ## WES - RNAseq analyses
 
 ```{r}
-#Figure S1L) upper half - Relation of RNA Immune score to main genomic parameters
+#Figure S3L) upper half - Relation of RNA Immune score to main genomic parameters
 molecular_scores <- read.csv("/home/daniel/IMMUCAN/H&N/molecular_scores_cnv.csv",
                              sep = ";", row.names = 3, dec = ",")
 as.data.frame(cbind(full_features, 

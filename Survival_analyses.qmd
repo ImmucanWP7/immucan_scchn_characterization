@@ -454,7 +454,7 @@ final_cox$Prognosis[full_cox[1, rownames(final_cox)] < 0] <- "Better prognosis"
 ```
 
 ```{r}
-#Figure 7A left) Prognostic features
+#Figure 5A left) Prognostic features
 final_cox %>%
   ggplot(aes(
     x = reorder(feature, p_value),
@@ -575,7 +575,7 @@ for (element in clin_vars) {
 ```
 
 ```{r}
-#Figure 7A) right panel - Subgroup analysis of prognostic features
+#Figure 5A) right panel - Subgroup analysis of prognostic features
 all_models <- data.frame(all_models, check.names = FALSE)
 rownames(all_models)[312] <- "CD8_infiltrated"
 all_models <- all_models[rownames(final_cox), ]
@@ -691,7 +691,7 @@ plot_survival <- function(data_matrix,
 ```
 
 ```{r}
-#Figure 7B-E) Kaplan-Meier plots
+#Figure 5B-E) Kaplan-Meier plots
 plot_survival(
   corrected_full_features,
   clinical_data_rm,
@@ -770,7 +770,7 @@ plot_survival(
 ```
 
 ```{r}
-#Figure 7B-E) Multivariate Cox survival models
+#Figure 5B-E) Multivariate Cox survival models
 clin_cox <- as.data.frame(cbind(if1_data[, "T_total_p"], clinical_data_rm_if1[, c(
   "ECOG_si",
   "Consumption",

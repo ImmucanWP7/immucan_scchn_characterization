@@ -114,7 +114,7 @@ TLS_info <- TLS_info[rownames(samples_data_rm_if1),]
 ```
 
 ```{r}
-#Figure 1D) General heatmap of IF1
+#Figure S2D) General heatmap of IF1
 IF <- if1_data %>% 
   select(
     B_tumor_p,
@@ -249,7 +249,7 @@ draw(ht_if, merge_legend= TRUE)
 ```
 
 ```{r}
-#Figure S1E) CD8+ immune phenotype according to TLS presence
+#Figure S3E) CD8+ immune phenotype according to TLS presence
 cbind(TLS_info[,"any_tls", drop=FALSE], "Immune type" = CD8_cats[TLS_info$sample,"immuneCD8_type_3"]) %>%
   drop_na() %>% 
   group_by(any_tls, `Immune type`) %>%
@@ -264,7 +264,7 @@ cbind(TLS_info[,"any_tls", drop=FALSE], "Immune type" = CD8_cats[TLS_info$sample
 ```
 
 ```{r output = FALSE}
-#Figure S1F) Correlation in IF cell types proportions
+#Figure S3F) Correlation in IF cell types proportions
 
 #Compute correlations
 big_if_matrix <- cbind(if1_data[intersect(rownames(if1_data), rownames(if3_data)), ], if3_data[intersect(rownames(if1_data), rownames(if3_data)), ])
@@ -305,7 +305,7 @@ pvalues_cor_ordered <- pvalues_cor[hc_order, hc_order]
 ```
 
 ```{r}
-#Plot
+#Plot figure S3F
 corrplot::corrplot(
   big_if_matrix_cor_ordered,
   tl.col = "black",
@@ -319,7 +319,7 @@ corrplot::corrplot(
 ```
 
 ```{r}
-#Figures S1G-H) Correlation between PDL1+ tumor cells and T cells 
+#Figures S3G-H) Correlation between PDL1+ tumor cells and T cells 
 common_if1_if2 <- intersect(rownames(if1_data), rownames(if2_data))
 as.data.frame(cbind(if1_data[common_if1_if2, ], if2_data[common_if1_if2, ])) %>%
   ggplot(aes(TumorCells_PDL1_ptotalTumorCells_total, T_tumor_p)) +
@@ -347,7 +347,7 @@ as.data.frame(cbind(if1_data[common_if1_if2, ], if2_data[common_if1_if2, ])) %>%
 ## HPV analyses
 
 ```{r}
-#Figure S1M) Differences in IF cell proportions according to HPV status
+#Figure 1L) Differences in IF cell proportions according to HPV status
 HPV_status <- clinical_data_rm_if1$HPV_status_temp
 HPV_status[HPV_status == "Negative"] <- "HPV-negative"
 HPV_status[HPV_status == "Positive"] <- "HPV-positive"
@@ -399,7 +399,7 @@ as.data.frame(cbind(if3_data[, grepl("(CD|Treg|NK).*total", colnames(if3_data))]
 ```
 
 ```{r}
-#Figure S3C) Differences in IF populations according to HPV status only in M naive patients
+#Figure S4C) Differences in IF populations according to HPV status only in M naive patients
 HPV_status <- clinical_data_rm_if1$HPV_status_temp
 HPV_status[HPV_status == "Negative"] <- "HPV-negative"
 HPV_status[HPV_status == "Positive"] <- "HPV-positive"
@@ -454,54 +454,37 @@ as.data.frame(cbind(if3_data[clinical_data_rm_if3$RM_type == "M_naive",
         legend.position = "none")
 ```
 
-## Consumption & primary location analyses
-
 ```{r}
-#Figure 3C) Changes in IF according to primary diagnosis site
-data.frame(
-  "neutrophils" = if1_data$Neutrophil_total_p,
-  "Primary location" = factor(
-    clinical_data_rm_if1$Prim_diagnosis,
-    levels = c("Oral_cavity", "Oropharynx", "Hypopharynx", "Larynx")
-  ),
-  check.names = FALSE
-)[clinical_data_rm_if1$HPV_status_temp == "Negative", ] %>%
-  pivot_longer(!`Primary location`) %>%
-  ggplot(aes(name, value, color = `Primary location`)) +
-  geom_boxplot(linewidth = 0.8)  +
-  xlab("") +
-  ylab("Neutrophils / total cells (%)")  +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  theme(text = element_text(size = 18)) +
-  stat_compare_means(label = "p", size = 5) + 
-  scale_color_manual(values = c("#ff8901", "#d5c3ff", "#028002", "#ffe383"))
-```
+#Figure S4D) Differences in IF populations between HPV-negative and non-smoker non-drinker HPV-positive patients
+HPV_status <- clinical_data_rm_if1$HPV_status_temp
+HPV_status[HPV_status == "Negative"] <- "HPV-negative"
+HPV_status[HPV_status == "Positive"] <- "HPV-positive"
 
-```{r}
-#Figure S3D) Differences in IF according to consumption status
-Consumption <- clinical_data_rm_if1$Consumption
-Consumption[Consumption == "Smoker_and_or_drinker"] <- "Smoker and/or drinker"
-Consumption[Consumption == "Non_smoker_non_drinker"] <- "Non smoker non drinker"
-
-as.data.frame(cbind(if1_data[, grepl("total", colnames(if1_data))],
-                    "Consumption" = Consumption))[!is.na(Consumption),] %>%
+as.data.frame(cbind(if1_data[!(clinical_data_rm_if1$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if1$Consumption == "Smoker_and_or_drinker"),                             
+                             grepl("total", colnames(if1_data))],
+                    "HPV_status" = HPV_status[!(clinical_data_rm_if1$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if1$Consumption == "Smoker_and_or_drinker")])) %>% 
   rename(all_of(new_names_IF1)) %>% 
-  pivot_longer(!Consumption) %>% 
-  ggplot(aes(reorder(name, value), value, color = Consumption)) + 
+  pivot_longer(!HPV_status) %>% 
+  ggplot(aes(reorder(name, value), value, color = HPV_status)) + 
   geom_boxplot(linewidth = 0.8) +
   scale_color_manual(values = c("gray41", "firebrick3")) +
-  xlab("") + 
+  xlab("") +
   ylab("cells / total cells (%)")  +
   theme_bw(base_size = 30, base_family = "Helvetica") + 
   theme(text = element_text(size = 18),
         legend.position = c(0.1, 0.8)) +
   guides(color = guide_legend(title = NULL))
 
-as.data.frame(cbind(if1_data[, grepl("otal", colnames(if1_data))],
-                    "Consumption" = Consumption))[!is.na(Consumption),] %>%
-  pivot_longer(!Consumption) %>%
+as.data.frame(cbind(if1_data[!(clinical_data_rm_if1$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if1$Consumption == "Smoker_and_or_drinker"),
+                             grepl("otal", colnames(if1_data))],
+                    "HPV_status" = HPV_status[!(clinical_data_rm_if1$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if1$Consumption == "Smoker_and_or_drinker")])) %>%
+  pivot_longer(!HPV_status) %>%
   filter(name == "Total immune cells") %>% 
-  ggplot(aes(name, value, color = Consumption)) + 
+  ggplot(aes(name, value, color = HPV_status)) + 
   geom_boxplot(linewidth = 0.8) +
   scale_color_manual(values = c("gray41", "firebrick3")) +
   xlab("") + 
@@ -511,27 +494,33 @@ as.data.frame(cbind(if1_data[, grepl("otal", colnames(if1_data))],
         legend.position = NULL) +
   guides(color = guide_legend(title = NULL))
 
-Consumption <- clinical_data_rm_if3$Consumption
-Consumption[Consumption == "Smoker_and_or_drinker"] <- "Smoker and/or drinker"
-Consumption[Consumption == "Non_smoker_non_drinker"] <- "Non smoker non drinker"
-as.data.frame(cbind(if3_data[, grepl("(CD|Treg|NK).*total", colnames(if3_data))],
-                    "Consumption" = Consumption))[!is.na(Consumption),] %>% 
+
+HPV_status <- clinical_data_rm_if3$HPV_status_temp
+HPV_status[HPV_status == "Negative"] <- "HPV-negative"
+HPV_status[HPV_status == "Positive"] <- "HPV-positive"
+
+as.data.frame(cbind(if3_data[!(clinical_data_rm_if3$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if3$Consumption == "Smoker_and_or_drinker"),
+                             grepl("(CD|Treg|NK).*total", colnames(if3_data))],
+                    "HPV_status" = HPV_status[!(clinical_data_rm_if3$HPV_status_temp == "Positive" & 
+                                 clinical_data_rm_if3$Consumption == "Smoker_and_or_drinker")])) %>% 
   rename(all_of(new_names_IF3)) %>% 
-  pivot_longer(!Consumption) %>% 
-  ggplot(aes(name, value, color = Consumption)) + 
+  pivot_longer(!HPV_status) %>% 
+  ggplot(aes(name, value, color = HPV_status)) + 
   geom_boxplot(linewidth = 0.8) +
   scale_color_manual(values = c("gray41", "firebrick3")) +
-  xlab("") +
+  xlab("") + 
   ylab("cells / total cells (%)")  +
   theme_bw(base_size = 30, base_family = "Helvetica") + 
   theme(text = element_text(size = 18),
-        legend.position = "none") 
+        legend.position = "none")
+
 ```
 
 ## Metastatic vs locoregional analyses
 
 ```{r}
-#Figure S5D) DIfferences in IF according to disease extent
+#Figure S6B) DIfferences in IF according to disease extent
 clinical_data_rm_if1[, "Disease extent"] <- clinical_data_rm_if1$Metastatic_at_Rbiopsy
 clinical_data_rm_if1$`Disease extent`[clinical_data_rm_if1$`Disease extent` == "No"] <- "Locoregional disease only"
 clinical_data_rm_if1$`Disease extent`[clinical_data_rm_if1$`Disease extent` == "Yes"] <- "Distant metastatic disease"
@@ -588,7 +577,7 @@ if1_data %>%
 ## R/M treatment lines analyses
 
 ```{r}
-#Figure 6E-F) IF changes by number of systemic treatment lines
+#Figure 3E-F) IF changes by number of systemic treatment lines
 as.data.frame(cbind(if1_data[, grepl("total", colnames(if1_data)) & 
                                !grepl("Tumor|other", colnames(if1_data))],
                     "Number R/M line" = clinical_data_rm_if1$max_line_before_Rbiopsy_si)) %>%
@@ -621,7 +610,7 @@ as.data.frame(cbind(if3_data[, grepl("total", colnames(if3_data)) &
 ```
 
 ```{r}
-#Figure 6G) PDL1+ tumor cells by number treatment lines
+#Figure 3G) PDL1+ tumor cells by number treatment lines
 if2_data %>% 
   rename("Tumor cells PDL1+" = "TumorCells_PDL1_ptotalTumorCells_total") %>%
   pivot_longer(!CPS_total) %>%
@@ -637,7 +626,7 @@ if2_data %>%
 ```
 
 ```{r}
-#Figure 6H) TLS presence by number treatment lines
+#Figure 3H) TLS presence by number treatment lines
 as.data.frame(cbind(TLS_info[, "any_tls", drop = FALSE],
                     clinical_data_rm_if1[, "RM_type", drop = FALSE])) %>%
   drop_na() %>%
@@ -658,7 +647,7 @@ as.data.frame(cbind(TLS_info[, "any_tls", drop = FALSE],
 ## IF - WES analyses
 
 ```{r}
-#Figure S1L) lower half - CD8+ T cell IF correlation to genomic parameters
+#Figure S3L) lower half - CD8+ T cell IF correlation to genomic parameters
 molecular_scores <- read.csv(
   "/home/daniel/IMMUCAN/H&N/molecular_scores_cnv.csv",
   sep = ";",

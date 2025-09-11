@@ -239,7 +239,7 @@ levels(colda$max_line_before_Rbiopsy_si) <-  c("0 (64)", "1 (46)", "2 (71)", "3 
 ```
 
 ```{r}
-#Figure 1B) General oncoprint
+#Figure S2B) General oncoprint
 colda <- colda %>% mutate(
   max_lin = case_when(
     any_treatment_before_Rbiopsy == "Naive" ~ "M naive (19)",
@@ -364,7 +364,7 @@ decorate_annotation("TMB", {
 ```
 
 ```{r}
-#Figure S3A) Oncoprint according to HPV status
+#Figure S4A) Oncoprint according to HPV status
 colda <- clinical_data_raw %>% filter(Article_I == "Yes")
 colda <- colda %>% mutate(Death = case_when(
   !is.na(Death_date) ~ 1,
@@ -686,7 +686,7 @@ draw(ht_list, merge_legend = TRUE)
 ```
 
 ```{r}
-#Figure S1A-B) Association of TMB to other genomic parameters
+#Figure S3A-B) Association of TMB to other genomic parameters
 molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue",] %>% 
   ggplot(aes(tmb, ploidy)) +
   geom_point() + stat_cor(size = 5, method = "spearman", label.x = 15) + 
@@ -750,7 +750,7 @@ ff <- ff %>% left_join(cc %>% filter(!is.na(pvalue))%>% select(Gene_Name, pvalue
 ```
 
 ```{r}
-#Figure 2A) Most common SNVs in HPV-positive patients
+#Figure 1A) Most common SNVs in HPV-positive patients
 mut_HPVneg_top <- head(ff %>% arrange(desc(Negative)),16)
 mut_HPVpos_top <- head(ff %>% arrange(desc(Positive)),16)
 
@@ -811,7 +811,7 @@ ggplot(df_l_pos, aes(x = Gene_Name, y = Frequence, fill = HPV_status)) +
 ```
 
 ```{r}
-#Figure 2B) Most common SNVs in HPV-negative patients
+#Figure 1B) Most common SNVs in HPV-negative patients
 df_l_neg <- df_l %>% filter(Gene_Name %in% mut_HPVneg_top$Gene_Name) 
 
 df_l_neg$Gene_Name <- factor(df_l_neg$Gene_Name, levels= mut_HPVneg_top$Gene_Name)
@@ -895,7 +895,7 @@ ff <- ff %>% mutate(tot = sum(Negative, Positive)) %>% mutate(tot_freq = tot/253
 ```
 
 ```{r}
-#Figure 2C) Most common CNV in HPV-positive patients
+#Figure 1C) Most common CNV in HPV-positive patients
 ff$Gene_Name[ff$Gene_Name == "FGF3"] <- "11q13.3"
 ff <- ff %>% filter(!Gene_Name %in% c("CCND1", "FGF4", "FGF19")) %>% filter(!Gene_Name %in% c("HLA.A", "HLA.B", "HLA.C"))
 
@@ -966,7 +966,7 @@ ggplot(df_l_pos, aes(x = Gene, y = Frequence, fill = HPV_status))  +
 ```
 
 ```{r}
-#Figure 2D) Most common CNVs in HPV-negative patients
+#Figure 1D) Most common CNVs in HPV-negative patients
 df_l_neg <- df_l %>% filter(Gene %in% cnv_HPVneg_top$Gene) 
 
 df_l_neg$Gene <- factor(df_l_neg$Gene, levels= cnv_HPVneg_top$Gene)
@@ -1054,7 +1054,7 @@ ff <- ff %>% mutate(tot = sum(Negative, Positive)) %>% mutate(tot_freq = tot/253
 ```
 
 ```{r}
-#Figure 2D) Genomic alterations in pathways according to HPV status
+#Figure 1D) Genomic alterations in pathways according to HPV status
 ff <- ff %>% filter(Gene_Name != "DNA_repair_long")
 ff$Gene_Name[ff$Gene_Name == "DNA_repair"] <- "DNA repair"
 ff$Gene_Name[ff$Gene_Name == "cell_cycle"] <- "Cell cycle"
@@ -1150,7 +1150,7 @@ rownames(molecular) <- molecular$patient
 ```
 
 ```{r}
-#Figure S3B) Oncoprint with HPV subtypes
+#Figure S4B) Oncoprint with HPV subtypes
 cnv <- cnv_wes %>% filter(patient %in% col$patient)
 cnv_n <- cnv %>% 
   select(-sample) %>%
@@ -1391,7 +1391,7 @@ ff_path <- ff_path %>% mutate(type= "Pathway")
 ```
 
 ```{r}
-#Figure 3A) Genomic features affected by consumption
+#Figure S5A) Genomic features affected by consumption
 ff_mut <- ff_mut %>% mutate(alteration = "")
 ff_path <- ff_path %>% mutate(alteration = "")
 ff_tot <- rbind(ff_mut %>% filter(pvalue < 0.05), ff_cnv %>% filter(pvalue < 0.05))
@@ -1479,7 +1479,7 @@ ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, 
 ```
 
 ```{r}
-#Figure 3B) Genomic features affected by primary diagnosis site
+#Figure S5B) Genomic features affected by primary diagnosis site
 ff_mut <- ff_mut %>% mutate(alteration = "") %>% mutate(type = "Mutations") %>% filter(Gene_Name != "HLA.A")
 ff_path <- ff_path %>% mutate(alteration = "") %>% mutate(type = "Pathway")
 ff_cnv <- ff_cnv %>% mutate(type = "CNV") %>% filter(Gene_Name != "HLA.A")
@@ -1660,64 +1660,6 @@ ggplot(
   ) 
 ```
 
-```{r}
-#Figure S4A) Relation between genomic parameters and consumption 
-molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative" & !is.na(clinical_data_rm_wes$Consumption),]  %>%
-  ggplot(aes(clinical_data_rm_wes$Consumption[clinical_data_rm_wes$HPV_status_temp == "Negative" & !is.na(clinical_data_rm_wes$Consumption)] , tmb)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "TMB (mutations/Mb)") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
-                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Consumption[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Ploidy") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
-                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
-
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Consumption[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Fraction genome altered") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Non_smoker_non_drinker" = "Non smokers non drinkers",
-                              "Smoker_and_or_drinker" = "Smokers and/or drinkers"))
-```
-
-```{r}
-#Figure S4B) Effect of diagnosis site on genomic parameters
-molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "TMB (mutations/Mb)") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Ploidy") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Prim_diagnosis[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Fraction genome altered") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("Oral_cavity" = "Oral cavity"))
-```
-
 ## Metastatic vs locoregional analyses
 
 ```{r}
@@ -1729,7 +1671,7 @@ ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, 
 ```
 
 ```{r}
-#Figure 5A) Genomic features affected by disease extent
+#Figure 2A) Genomic features affected by disease extent
 ff_mut <- ff_mut %>% mutate(alteration = "") %>% mutate(type = "Mutations")
 ff_path <- ff_path %>% mutate(alteration = "") %>% mutate(pval_adj_3p = NA) %>% mutate(type = "Pathway")
 ff_cnv <- ff_cnv %>% mutate(type = "CNV") %>% filter(!Gene_Name %in% c("HLA.A", "HLA.B", "HLA.C"))
@@ -1797,60 +1739,6 @@ ggplot(ff_tot , aes(
   ) 
 ```
 
-```{r}
-#Figure S5A) Genomic parameters according to disease extent in HPV-negative patients
-molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "TMB (mutations/Mb)") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Ploidy") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Negative"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Fraction genome altered") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-```
-
-```{r}
-#Figure S5B) Genomic parameters according to disease extent in HPV-positive patients
-molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[clinical_data_rm_wes$HPV_status_temp == "Positive"] , tmb)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "TMB (mutations/Mb)") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive"] , ploidy)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Ploidy") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-
-molecular_scores[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive",]  %>%
-  ggplot(aes(clinical_data_rm_wes$Metastatic_at_Rbiopsy[samples_data_rm_wes$specimen_type == "Fresh Frozen tissue" & clinical_data_rm_wes$HPV_status_temp == "Positive"] , CNA_altered)) + geom_boxplot(linewidth = 0.8) +
-  theme_bw(base_size = 30, base_family = "Helvetica") +
-  labs(x = "", y = "Fraction genome altered") + 
-  theme(text = element_text(size = 18)) + 
-  stat_compare_means(label= "p", label.x = 1.4) +
-  scale_x_discrete(labels = c("No" = "LRR", "Yes" = "DM"))
-```
-
 ## R/M treatment lines analyses
 
 ```{r}
@@ -1865,7 +1753,7 @@ ff_path <- compute_wes_freqs(pathways_wes, colda_WES, 'noAlteration', pathways, 
 ```
 
 ```{r}
-#Figure 6B) Genomic features affected by treatment lines
+#Figure 3B) Genomic features affected by treatment lines
 ff_mut <- ff_mut %>% mutate(alteration= "") %>% mutate(type= "Mutations")
 ff_path <- ff_path %>% mutate(alteration= "") %>% mutate(type = "Pathways")
 ff_cnv <- ff_cnv %>% mutate(type= "CNV")
@@ -2031,7 +1919,7 @@ ggplot(
 ```
 
 ```{r}
-#Figure 6A) Effect of treatment lines in genomic parameters in HPV-negative patients
+#Figure 3A) Effect of treatment lines in genomic parameters in HPV-negative patients
 molecular_scores[clinical_data_rm_wes$HPV_status_temp == "Negative", ]  %>%
   ggplot(aes(clinical_data_rm_wes$max_line_before_Rbiopsy_si[clinical_data_rm_wes$HPV_status_temp == "Negative"] , tmb)) +
   geom_boxplot(linewidth = 0.8) +
